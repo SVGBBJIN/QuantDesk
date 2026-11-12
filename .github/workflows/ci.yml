@@ -1,0 +1,27 @@
+name: ci
+
+# Tests only. No secrets, no broker access, read-only token: nothing here can trade.
+on:
+  push:
+    branches-ignore: [data]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt && pip install -e . --no-deps
+      - run: python -m pytest
+      - name: Synthetic end-to-end smoke (plumbing only)
+        run: |
+          python scripts/backtest_report.py --synthetic --no-sensitivity --out /tmp/rep --artifacts /tmp/art > /dev/null
+          python -m tqqq_desk.run_daily --fake-broker --dry-run --force --state-dir /tmp/st --now 2024-07-05T19:30:00-04:00

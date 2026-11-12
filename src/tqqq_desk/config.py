@@ -50,6 +50,8 @@ def validate(cfg: Cfg) -> None:
     for sym, w in s["max_weight"].items():
         if not 0 <= w <= 1:
             raise ConfigError(f"sizing.max_weight.{sym} must be in [0, 1]")
+    if r["sma_long"] not in (50, 100, 200) or r["sma_short"] != 50:
+        raise ConfigError("regime.sma_long must be one of 50/100/200 and sma_short 50 (features computed)")
     if r["bull_exit"] > r["bull_enter"]:
         raise ConfigError("regime.bull_exit must be <= bull_enter (hysteresis)")
     if r["bear_exit"] < r["bear_enter"]:

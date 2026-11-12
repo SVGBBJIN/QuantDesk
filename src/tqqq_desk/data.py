@@ -46,7 +46,8 @@ def fetch_alpaca_bars(symbols: list[str], start: str, end: str | None, feed: str
     req = StockBarsRequest(
         symbol_or_symbols=symbols, timeframe=TimeFrame.Day,
         start=pd.Timestamp(start, tz="UTC").to_pydatetime(),
-        end=pd.Timestamp(end, tz="UTC").to_pydatetime() if end else None,
+        end=(pd.Timestamp(end).tz_convert("UTC") if pd.Timestamp(end).tzinfo else pd.Timestamp(end, tz="UTC")).to_pydatetime()
+        if end else None,
         adjustment=Adjustment(adjustment), feed=DataFeed(feed),
     )
     raw = client.get_stock_bars(req).df
@@ -70,6 +71,8 @@ def load_bars(cfg, refresh: bool = True, end: str | None = None) -> dict[str, pd
     syms = all_symbols(cfg)
     cache = Path(d["cache_dir"])
     if refresh:
+        if end is None:  # free-plan SIP rejects queries touching the most recent 15 minutes
+            end = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=16)).isoformat()
         bars = fetch_alpaca_bars(syms, d["start"], end, d["feed"], d["adjustment"])
         cache.mkdir(parents=True, exist_ok=True)
         for s, df in bars.items():
