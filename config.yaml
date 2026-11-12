@@ -1,0 +1,104 @@
+# tqqq-desk configuration. Secrets never go here: ALPACA_KEY / ALPACA_SECRET come from env.
+
+data:
+  start: "2015-01-01"            # Alpaca daily history begins ~2016; earlier is simply not returned
+  signal_symbol: QQQ             # all features / labels / regime are computed on QQQ
+  trade_symbols: {long: TQQQ, short: SQQQ}
+  context_symbols: [SPY, TLT, UUP, VIXY]   # cross-asset context ("where available")
+  feed: sip                      # sip (free plan: historical OK, excludes last 15 min) or iex
+  adjustment: all                # split + dividend adjusted -> total-return series
+  cache_dir: data/cache
+  max_staleness_sessions: 0      # last bar must be the last completed session
+
+features:
+  calendar: auto                 # auto = keep only if it improves OOS log-loss; on / off
+  context_min_coverage: 0.90     # drop a context symbol if < 90% of QQQ dates have data
+
+labels:
+  horizon: 5                     # next-5-session QQQ return sign, and next-5-session realized vol
+  high_vol_threshold: 0.30       # annualized realized vol defining "high vol"
+
+regime:
+  sma_long: 200
+  sma_short: 50
+  bull_enter: 0.02               # QQQ >= 2% above SMA200 (and SMA50 > SMA200) to enter BULL
+  bull_exit: -0.01               # leave BULL when QQQ < 1% below SMA200
+  bear_enter: -0.03              # QQQ <= 3% below SMA200 (and SMA50 < SMA200) to enter BEAR
+  bear_exit: 0.00                # leave BEAR when QQQ back above SMA200
+  hv_enter: 0.40                 # 20d realized vol above 40% -> HIGH_VOL
+  hv_exit: 0.30                  # leave HIGH_VOL when back below 30%
+  min_hold_days: 5               # minimum days in a regime before it may change
+  highvol_overrides_min_hold: true
+
+model:
+  lgbm:
+    n_estimators: 200
+    learning_rate: 0.03
+    max_depth: 3
+    num_leaves: 7
+    min_child_samples: 50
+    subsample: 0.7
+    subsample_freq: 1
+    colsample_bytree: 0.7
+    reg_lambda: 5.0
+    reg_alpha: 1.0
+  logreg_C: 0.1
+  calibration: sigmoid           # sigmoid (Platt) or isotonic
+  calib_fraction: 0.25           # last 25% of each training window (purged) is used to calibrate
+  seed: 7
+
+validation:
+  min_train: 504                 # ~2 years before first out-of-sample prediction
+  test_block: 63                 # retrain every ~quarter
+  embargo: 5                     # extra gap (bars) on top of label-horizon purging
+  bootstrap_samples: 2000
+  bootstrap_block: 20            # stationary block bootstrap mean block length (days)
+
+decision:
+  up_enter: 0.55                 # P(up) to enter TQQQ
+  up_exit: 0.50                  # stay in TQQQ while P(up) >= this (hysteresis)
+  vol_cap: 0.50                  # P(high vol next 5d) must be below this for TQQQ
+  down_enter: 0.60               # P(down) to enter SQQQ (higher bar than TQQQ)
+  down_exit: 0.55
+  sqqq_max_days: 10              # cap SQQQ holding period (volatility decay)
+  sqqq_cooldown_days: 5          # after cap is hit, no SQQQ re-entry for this many days
+
+fallback:                        # rule-based regime strategy used when the ML gate fails
+  long_regimes: [BULL]
+  allow_sqqq: false
+
+sizing:
+  target_vol: 0.45               # annualized portfolio vol target
+  vol_lookback: 20
+  kelly_fraction: 0.25           # hard-capped at 0.25 in code
+  kelly_lookback: 252
+  max_weight: {TQQQ: 1.00, SQQQ: 0.30}
+  min_weight: 0.05               # below this -> cash
+  rebalance_band: 0.10           # don't trade if |target - current| weight change < band
+
+costs:
+  commission_bps: 2.0
+  slippage_bps: 1.0
+
+gate:
+  benchmark: sma200
+  min_sharpe_diff: 0.0
+  require_sortino_better: true
+  min_bootstrap_prob: 0.60       # P(Sharpe_ML > Sharpe_SMA200) under paired block bootstrap
+
+sensitivity:
+  ml:   {up_enter: [0.50, 0.525, 0.55, 0.575, 0.60, 0.625], vol_cap: [0.30, 0.40, 0.50, 0.60, 0.70]}
+  rule: {bull_enter: [-0.01, 0.0, 0.01, 0.02, 0.03, 0.04], hv_enter: [0.30, 0.35, 0.40, 0.45, 0.50]}
+
+risk:
+  max_daily_loss: 0.08           # halt if account equity falls > 8% vs prior close
+  max_drawdown: 0.30             # halt if equity falls > 30% from peak
+  kill_action: flatten           # flatten (exit to cash, then halt) or freeze (no orders)
+  buying_power_buffer: 0.05      # assume open can gap 5% above last close when sizing buys
+  model_max_age_days: 14         # older validation status -> rule fallback
+
+execution:
+  order_type: market_on_open     # Alpaca TIF=OPG, whole shares
+  opg_window_start: "19:00"      # ET; Alpaca accepts OPG orders ~19:00 -> 09:28 next session
+  opg_window_end: "09:28"
+  client_order_prefix: tqd
