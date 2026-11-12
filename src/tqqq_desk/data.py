@@ -119,7 +119,8 @@ def _ohlc_from_close(close: np.ndarray, rng: np.random.Generator, gap_sd: float)
                          "volume": rng.integers(1e6, 5e6, len(close)).astype(float)})
 
 
-def synthetic_bars(n: int = 2600, seed: int = 0, start: str = "2016-01-04") -> dict[str, pd.DataFrame]:
+def synthetic_bars(n: int = 2600, seed: int = 0, start: str = "2016-01-04",
+                   regime_switching: bool = True) -> dict[str, pd.DataFrame]:
     """Regime-switching GBM for QQQ; TQQQ/SQQQ built as daily-rebalanced +/-3x of QQQ's
     open->close and close->open legs minus fee/financing drag (so they decay like the real ETFs).
     FOR TESTS AND SMOKE RUNS ONLY - never evidence of edge."""
@@ -129,10 +130,10 @@ def synthetic_bars(n: int = 2600, seed: int = 0, start: str = "2016-01-04") -> d
     n = len(sess)
     # 2-state Markov regime: calm-bull / stressed-bear
     state = np.zeros(n, dtype=int)
-    for i in range(1, n):
+    for i in range(1, n if regime_switching else 1):
         p_stay = 0.995 if state[i - 1] == 0 else 0.98
         state[i] = state[i - 1] if rng.random() < p_stay else 1 - state[i - 1]
-    mu = np.where(state == 0, 0.0008, -0.0010)
+    mu = np.where(state == 0, 0.0008, -0.0010) if regime_switching else np.zeros(n)
     sd = np.where(state == 0, 0.011, 0.028)
     r = rng.normal(mu, sd)
     qqq_close = 100 * np.exp(np.cumsum(r))
