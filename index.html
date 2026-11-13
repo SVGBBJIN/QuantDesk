@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QuantDesk</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --text: #14181f; --muted: #6b7280;
+    --border: #e3e6eb; --accent: #2563eb; --up: #15803d; --down: #b91c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1116; --card: #161b22; --text: #e6e8eb; --muted: #8b93a1;
+      --border: #262d38; --accent: #5b9bff; --up: #3fb968; --down: #f0605d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; justify-content: space-between; align-items: center;
+    padding: 16px 24px; border-bottom: 1px solid var(--border); background: var(--card); }
+  header h1 { font-size: 18px; margin: 0; }
+  header span { color: var(--muted); font-size: 13px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px; display: grid; gap: 16px; }
+  .stats { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .label { color: var(--muted); font-size: 13px; }
+  .value { font-size: 26px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .sub { font-size: 13px; font-variant-numeric: tabular-nums; }
+  .up { color: var(--up); } .down { color: var(--down); }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  svg { width: 100%; height: auto; display: block; }
+  .line { fill: none; stroke: var(--accent); stroke-width: 2; }
+  .area { fill: var(--accent); opacity: .12; }
+  .grid { stroke: var(--border); stroke-width: 1; }
+  .tick { fill: var(--muted); font-size: 11px; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 500; font-size: 13px; }
+  tr:last-child td { border-bottom: 0; }
+  footer { text-align: center; color: var(--muted); font-size: 12px; padding: 8px 0 24px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>QuantDesk</h1>
+  <span>Sample data · live dashboard runs separately (Streamlit)</span>
+</header>
+<main>
+  <section class="stats" id="stats"></section>
+  <section class="card">
+    <h2>Portfolio value (30 days)</h2>
+    <svg id="chart" viewBox="0 0 800 260" role="img" aria-label="Portfolio value over 30 days"></svg>
+  </section>
+  <section class="card">
+    <h2>Positions</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Symbol</th><th>Qty</th><th>Price</th><th>Value</th><th>Day %</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<footer>Demo figures are generated locally, not real market data.</footer>
+<script>
+  const fmt = n => n.toLocaleString("en-US", { style: "currency", currency: "USD" });
+  const pct = n => (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
+  const cls = n => (n >= 0 ? "up" : "down");
+
+  const positions = [
+    { sym: "AAPL", qty: 120, price: 228.4, day: 0.8 },
+    { sym: "MSFT", qty: 60, price: 421.15, day: -0.3 },
+    { sym: "NVDA", qty: 90, price: 138.72, day: 2.1 },
+    { sym: "SPY",  qty: 50, price: 585.3, day: 0.4 },
+    { sym: "TLT",  qty: 200, price: 92.6, day: -0.9 },
+  ];
+
+  // Deterministic pseudo-random walk so the demo looks the same on every load.
+  let seed = 7;
+  const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const equity = [];
+  let v = 100000;
+  for (let i = 0; i < 30; i++) { v *= 1 + (rand() - 0.46) * 0.02; equity.push(v); }
+
+  const total = positions.reduce((s, p) => s + p.qty * p.price, 0);
+  // Rescale the curve so it ends at the current portfolio value.
+  const scale = total / equity.at(-1);
+  equity.forEach((val, i) => { equity[i] = val * scale; });
+  const dayPnl = positions.reduce((s, p) => s + p.qty * p.price * p.day / 100, 0);
+  const monthRet = (equity.at(-1) / equity[0] - 1) * 100;
+  let peak = 0, maxDd = 0;
+  for (const x of equity) { peak = Math.max(peak, x); maxDd = Math.min(maxDd, (x / peak - 1) * 100); }
+
+  const stats = [
+    ["Total value", fmt(total), ""],
+    ["Day P&L", fmt(dayPnl), `<span class="sub ${cls(dayPnl)}">${pct(dayPnl / total * 100)}</span>`],
+    ["30-day return", pct(monthRet), ""],
+    ["Max drawdown", pct(maxDd), ""],
+  ];
+  document.getElementById("stats").innerHTML = stats.map(([l, val, sub], i) =>
+    `<div class="card"><div class="label">${l}</div>
+     <div class="value ${i === 2 ? cls(monthRet) : i === 3 ? "down" : i === 1 ? cls(dayPnl) : ""}">${val}</div>${sub}</div>`).join("");
+
+  document.getElementById("rows").innerHTML = positions.map(p =>
+    `<tr><td><strong>${p.sym}</strong></td><td>${p.qty}</td><td>${fmt(p.price)}</td>
+     <td>${fmt(p.qty * p.price)}</td><td class="${cls(p.day)}">${pct(p.day)}</td></tr>`).join("");
+
+  // Chart
+  const W = 800, H = 260, L = 56, R = 12, T = 12, B = 24;
+  const lo = Math.min(...equity), hi = Math.max(...equity), pad = (hi - lo) * 0.1;
+  const x = i => L + i / (equity.length - 1) * (W - L - R);
+  const y = val => T + (1 - (val - (lo - pad)) / (hi - lo + 2 * pad)) * (H - T - B);
+  const pts = equity.map((val, i) => `${x(i).toFixed(1)},${y(val).toFixed(1)}`);
+  let svg = "";
+  for (let k = 0; k <= 4; k++) {
+    const val = lo - pad + (hi - lo + 2 * pad) * k / 4, yy = y(val);
+    svg += `<line class="grid" x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}"/>
+            <text class="tick" x="${L - 8}" y="${yy + 4}" text-anchor="end">${Math.round(val / 1000)}k</text>`;
+  }
+  svg += `<text class="tick" x="${L}" y="${H - 6}">30d ago</text>
+          <text class="tick" x="${W - R}" y="${H - 6}" text-anchor="end">Today</text>
+          <polygon class="area" points="${x(0)},${H - B} ${pts.join(" ")} ${x(equity.length - 1)},${H - B}"/>
+          <polyline class="line" points="${pts.join(" ")}"/>`;
+  document.getElementById("chart").innerHTML = svg;
+</script>
+</body>
+</html>
