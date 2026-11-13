@@ -1,0 +1,43 @@
+name: validate
+
+# Weekly walk-forward validation + ML gate + sensitivity report. Writes artifacts/model_status.json
+# to the data branch; the daily trader only uses the ML ensemble if that status says the gate passed.
+on:
+  schedule:
+    - cron: "23 15 * * 6"     # Saturdays 15:23 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tqqq-desk-state
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+      ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt && pip install -e . --no-deps
+      - name: Check out bot state (data branch)
+        run: .github/scripts/checkout_state.sh
+      - name: Walk-forward backtest, gate, sensitivity
+        run: python scripts/backtest_report.py --out state/reports --artifacts state/artifacts
+      - name: Job summary
+        if: ${{ always() }}
+        run: cat state/reports/backtest_report.md >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Persist artifacts to data branch
+        if: ${{ always() }}
+        run: .github/scripts/commit_state.sh "weekly validation"

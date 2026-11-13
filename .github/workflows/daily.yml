@@ -1,0 +1,73 @@
+name: daily-trade
+
+# Runs after the US close on trading days. Actions cron is UTC and ignores DST, so several crons
+# fire; the script itself exits early unless it is a session day after 19:00 ET (when Alpaca accepts
+# market-on-open orders) and the session has not already been processed (idempotent).
+#   23:37 UTC = 19:37 EDT (summer) / 18:37 EST (winter -> skipped as too early)
+#   00:37 UTC = 20:37 EDT          / 19:37 EST
+#   02:37 UTC = 22:37 EDT          / 21:37 EST  (backup if Actions delays the earlier runs)
+on:
+  schedule:
+    - cron: "37 23 * * 1-5"
+    - cron: "37 0 * * 2-6"
+    - cron: "37 2 * * 2-6"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: compute and log orders but submit nothing"
+        type: boolean
+        default: true
+      force:
+        description: "Skip the scheduled-time check (still must be inside the MOO order window unless dry run)"
+        type: boolean
+        default: false
+      reset_kill_switch:
+        description: "Clear a latched kill switch (after you have investigated!)"
+        type: boolean
+        default: false
+      adopt_broker_positions:
+        description: "Accept current broker TQQQ/SQQQ holdings as expected state (first run / manual fix)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # push bot state to the `data` branch only
+
+concurrency:
+  group: tqqq-desk-state      # shared with validate.yml: never two writers to the data branch
+  cancel-in-progress: false
+
+jobs:
+  trade:
+    # never trade from pull requests (this workflow has no PR trigger; belt and braces)
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+      ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+      ALPACA_LIVE: ${{ vars.ALPACA_LIVE || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt && pip install -e . --no-deps
+      - name: Check out bot state (data branch)
+        run: .github/scripts/checkout_state.sh
+      - name: Run daily trader
+        run: |
+          ARGS="--state-dir state"
+          [ "${{ inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          [ "${{ inputs.force }}" = "true" ] && ARGS="$ARGS --force"
+          [ "${{ inputs.reset_kill_switch }}" = "true" ] && ARGS="$ARGS --reset-kill-switch"
+          [ "${{ inputs.adopt_broker_positions }}" = "true" ] && ARGS="$ARGS --adopt-broker-positions"
+          # live trading needs BOTH repo variables ALPACA_LIVE=true and I_UNDERSTAND_THE_RISK=true
+          [ "${{ vars.I_UNDERSTAND_THE_RISK }}" = "true" ] && ARGS="$ARGS --i-understand-the-risk"
+          python -m tqqq_desk.run_daily $ARGS
+      - name: Persist state to data branch
+        if: ${{ always() }}
+        run: .github/scripts/commit_state.sh "daily run"
