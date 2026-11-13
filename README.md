@@ -172,7 +172,25 @@ streamlit run dashboard/app.py                                # or TQQQ_STATE_DI
 ```
 It shows a PAPER/LIVE banner, kill-switch state, whether ML or the rule fallback is active (and why),
 today's regime and probabilities with a plain-language reason, current position and target, data and
-model freshness, live equity and drawdown, OOS backtest equity vs benchmarks, drawdowns, recent trades and signals.
+model freshness, live equity and drawdown, OOS backtest equity vs benchmarks, drawdowns, recent trades and signals,
+split across tabs (Live market / Decision & freshness / Performance / Trades & signals).
+
+### Live market data
+Data-only, never places orders.
+```bash
+# free Yahoo Finance scraper: no key, unofficial endpoint, for dashboards/research (not the trading path)
+python -m tqqq_desk.yahoo QQQ TQQQ                 # quotes
+python -m tqqq_desk.yahoo QQQ --history 6mo        # daily bars
+
+# Alpaca real-time WebSocket (free plan = IEX feed), printed to the terminal
+ALPACA_KEY=... ALPACA_SECRET=... python -m tqqq_desk.stream QQQ TQQQ SQQQ
+
+# local relay: Alpaca stream in, REST + WebSocket out (keys stay server-side); Yahoo fills in when the stream is down
+QD_SYMBOLS=QQQ,TQQQ,SQQQ,SPY,TLT uvicorn tqqq_desk.server:app --port 8765
+#   GET /api/health  /api/quotes  /api/history/{symbol}    WS /ws
+```
+The Live tab polls the relay (`QD_SERVER`, default `http://127.0.0.1:8765`) and falls back to Yahoo directly
+if it is not running. Alpaca allows one stream connection per account, so do not run two relays on one key.
 
 ## Configuration
 Everything tunable is in `config.yaml` (thresholds, horizons, model regularisation, sizing, costs, gate,

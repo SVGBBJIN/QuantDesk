@@ -4,16 +4,24 @@ Reads the bot's state from a local checkout of the `data` branch:
     git fetch origin data && git worktree add state origin/data     # first time
     git -C state pull                                               # refresh
     streamlit run dashboard/app.py            # or TQQQ_STATE_DIR=/path streamlit run ...
+
+Live prices come from the local relay (`uvicorn tqqq_desk.server:app --port 8765`, Alpaca WebSocket);
+if it is not running the Live tab falls back to the free Yahoo scraper.
 """
 from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import altair as alt
 import pandas as pd
+import requests
 import streamlit as st
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))  # run without `pip install -e .`
+from tqqq_desk import yahoo  # noqa: E402
 
 # Reference categorical order (validated: adjacent-pair CVD dE >= 8, normal-vision dE >= 15).
 # Colour follows the entity, so each strategy always keeps the same hue.
@@ -76,6 +84,56 @@ def line_chart(df: pd.DataFrame, y_title: str, log: bool = False, fmt: str = ".2
     return (lines + rule + pts).properties(height=320).configure_axis(grid=True, gridOpacity=0.25)
 
 
+SERVER = os.environ.get("QD_SERVER", "http://127.0.0.1:8765")
+WATCHLIST = [x for x in os.environ.get("QD_SYMBOLS", "QQQ,TQQQ,SQQQ,SPY,TLT").split(",") if x]
+
+
+def live_quotes() -> tuple[dict, str]:
+    """(quotes, source label): the Alpaca relay if it is up, else Yahoo straight from this process."""
+    try:
+        r = requests.get(f"{SERVER}/api/quotes", timeout=2)
+        r.raise_for_status()
+        j = r.json()
+        st_ = j["status"]
+        label = (f"Alpaca {st_['feed'].upper()} WebSocket" if st_.get("connected")
+                 else "relay up, Alpaca stream down (Yahoo prices)") + (f" - {st_['error']}" if st_.get("error") else "")
+        return j["quotes"], label
+    except Exception:  # noqa: BLE001 - relay not running
+        try:
+            return {s: q.to_dict() for s, q in yahoo.quotes(WATCHLIST).items()}, "Yahoo (relay not running)"
+        except Exception as e:  # noqa: BLE001
+            return {}, f"no data: {e}"
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def yahoo_history(symbol: str, rng: str) -> pd.DataFrame:
+    return yahoo.history(symbol, rng)
+
+
+@st.fragment(run_every=5)
+def live_panel() -> None:
+    quotes, label = live_quotes()
+    st.caption(f"Source: {label} - refreshes every 5 s")
+    if not quotes:
+        st.warning("No live quotes available. Start the relay: `uvicorn tqqq_desk.server:app --port 8765`")
+        return
+    order = [x for x in WATCHLIST if x in quotes] + sorted(set(quotes) - set(WATCHLIST))
+    quotes = {x: quotes[x] for x in order}
+    cols = st.columns(min(len(quotes), 5))
+    for i, (sym, q) in enumerate(quotes.items()):
+        pc = q.get("change_pct")
+        cols[i % len(cols)].metric(sym, f"${q['price']:,.2f}" if q.get("price") is not None else "n/a",
+                                   f"{pc:+.2f}%" if pc is not None else None)
+    df = pd.DataFrame([{"Symbol": s, "Price": q.get("price"), "Bid": q.get("bid"), "Ask": q.get("ask"),
+                        "Day %": q.get("change_pct"), "Source": q.get("source"),
+                        "Updated": pd.to_datetime(q.get("ts"), unit="s", utc=True).strftime("%H:%M:%S UTC")
+                        if q.get("ts") else "-"} for s, q in quotes.items()])
+    df = df.dropna(axis=1, how="all")  # no bid/ask until the Alpaca stream is connected
+    st.dataframe(df, hide_index=True, width="stretch", column_config={
+        c: st.column_config.NumberColumn(format="$%.2f") for c in ("Price", "Bid", "Ask")
+    } | {"Day %": st.column_config.NumberColumn(format="%+.2f%%")})
+
+
 # ------------------------------------------------------------------------------------- load
 default_dir = os.environ.get("TQQQ_STATE_DIR", "state")
 state_dir = Path(st.sidebar.text_input("State directory (checkout of the `data` branch)", default_dir))
@@ -112,91 +170,113 @@ with c1:
         st.success("✅ Kill switch armed, not tripped")
 with c2:
     st.subheader("Model")
-    m = model.get("mode") or status.get("mode") or "RULE"
-    if m == "ML":
+    model_mode = model.get("mode") or status.get("mode") or "RULE"
+    if model_mode == "ML":
         st.success("✅ ML ensemble active: it passed the out-of-sample gate")
     else:
         st.warning("⚠️ RULE-BASED FALLBACK ACTIVE. " + (model.get("message") or status.get("message")
                                                         or "No validation has been run yet."))
 
-# ------------------------------------------------------------------------------- decision
-st.subheader("Today's decision")
-d = state.get("last_decision", {})
-exp = state.get("expected_positions", {})
-tgt = d.get("target")
-tgt_txt = "frozen (halt)" if tgt is None and d else (", ".join(f"{s} {w:.0%}" for s, w in (tgt or {}).items()) or "CASH")
-fmt_p = lambda x: f"{x:.2f}" if x is not None else "n/a (rule mode)"
-st.table(pd.DataFrame({
-    "Signal session": [d.get("signal_date") or "—"], "Regime": [d.get("regime") or "—"],
-    "P(up, next 5d)": [fmt_p(d.get("p_up"))], "P(high vol, next 5d)": [fmt_p(d.get("p_hivol"))],
-    "Model": [d.get("model_mode") or "—"], "Target": [tgt_txt],
-}).set_index("Signal session"))
-pos_txt = ", ".join(f"{s}: {q:g} sh" for s, q in exp.items()) or "CASH"
-st.markdown(f"**Position after pending orders fill:** {pos_txt}")
-if d.get("orders"):
-    st.markdown("**Orders submitted (market-on-open):** " +
-                "; ".join(f"{o['side'].upper()} {o['qty']} {o['symbol']}" for o in d["orders"]))
-st.info("**Why:** " + (d.get("reason") or "no decision yet"))
+tab_live, tab_dec, tab_perf, tab_trades = st.tabs(["Live market", "Decision & freshness", "Performance", "Trades & signals"])
 
-# ------------------------------------------------------------------------------- freshness
-st.subheader("Freshness")
-f = st.columns(4)
-f[0].metric("Last run", _age(state.get("last_run_at")))
-f[1].metric("Last daily bar", state.get("data_last_bar") or "—")
-f[2].metric("Model validated", _age(model.get("validated_at") or status.get("validated_at")))
-f[3].metric("Model trained through", model.get("trained_through") or "—")
-if status.get("data_source") and status.get("data_source") != "ALPACA":
-    st.warning(f"Validation artifacts come from {status['data_source']} data, so they are a plumbing check only.")
+with tab_live:
+    st.subheader("Live prices")
+    live_panel()
+    st.subheader("Price history (Yahoo, free)")
+    hc = st.columns([2, 1])
+    hsym = hc[0].selectbox("Symbol", WATCHLIST, key="hist_sym")
+    hrng = hc[1].selectbox("Range", ["1mo", "3mo", "6mo", "1y", "5y"], index=3, key="hist_rng")
+    try:
+        h = yahoo_history(hsym, hrng)
+        if h.empty:
+            st.caption("No history returned.")
+        else:
+            st.altair_chart(line_chart(h[["close"]].rename(columns={"close": hsym}), "Adjusted close ($)",
+                                       fmt=",.2f", axis_fmt="$,.0f"), width="stretch")
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"Yahoo history unavailable: {e}")
 
-# ------------------------------------------------------------------------------- equity
-st.subheader("Live account equity")
-eq = _read_csv(state_dir / "equity.csv", parse_dates=["date"])
-if not eq.empty:
-    e = eq.drop_duplicates("date", keep="last").set_index("date")
-    dd = (e["equity"] / e["equity"].cummax() - 1).rename("Drawdown from peak").to_frame()
-    m = st.columns(3)
-    m[0].metric("Equity", f"${e['equity'].iloc[-1]:,.0f}")
-    m[1].metric("Day P&L", f"{e['equity'].iloc[-1] / e['last_equity'].iloc[-1] - 1:+.2%}")
-    m[2].metric("Drawdown from peak", f"{dd.iloc[-1, 0]:.1%}")
-    if len(e) >= 2:
-        st.altair_chart(line_chart(e[["equity"]].rename(columns={"equity": "Account equity"}), "Account equity ($)",
-                                   fmt=",.0f", axis_fmt="$,.0f"), width="stretch")
-        st.altair_chart(line_chart(dd, "Drawdown from peak", fmt=".1%", axis_fmt=".0%"), width="stretch")
+with tab_dec:
+    # ------------------------------------------------------------------------------- decision
+    st.subheader("Today's decision")
+    d = state.get("last_decision", {})
+    exp = state.get("expected_positions", {})
+    tgt = d.get("target")
+    tgt_txt = "frozen (halt)" if tgt is None and d else (", ".join(f"{s} {w:.0%}" for s, w in (tgt or {}).items()) or "CASH")
+    fmt_p = lambda x: f"{x:.2f}" if x is not None else "n/a (rule mode)"
+    st.table(pd.DataFrame({
+        "Signal session": [d.get("signal_date") or "—"], "Regime": [d.get("regime") or "—"],
+        "P(up, next 5d)": [fmt_p(d.get("p_up"))], "P(high vol, next 5d)": [fmt_p(d.get("p_hivol"))],
+        "Model": [d.get("model_mode") or "—"], "Target": [tgt_txt],
+    }).set_index("Signal session"))
+    pos_txt = ", ".join(f"{s}: {q:g} sh" for s, q in exp.items()) or "CASH"
+    st.markdown(f"**Position after pending orders fill:** {pos_txt}")
+    if d.get("orders"):
+        st.markdown("**Orders submitted (market-on-open):** " +
+                    "; ".join(f"{o['side'].upper()} {o['qty']} {o['symbol']}" for o in d["orders"]))
+    st.info("**Why:** " + (d.get("reason") or "no decision yet"))
+
+    # ------------------------------------------------------------------------------- freshness
+    st.subheader("Freshness")
+    f = st.columns(4)
+    f[0].metric("Last run", _age(state.get("last_run_at")))
+    f[1].metric("Last daily bar", state.get("data_last_bar") or "—")
+    f[2].metric("Model validated", _age(model.get("validated_at") or status.get("validated_at")))
+    f[3].metric("Model trained through", model.get("trained_through") or "—")
+    if status.get("data_source") and status.get("data_source") != "ALPACA":
+        st.warning(f"Validation artifacts come from {status['data_source']} data, so they are a plumbing check only.")
+
+with tab_perf:
+    # ------------------------------------------------------------------------------- equity
+    st.subheader("Account equity")
+    eq = _read_csv(state_dir / "equity.csv", parse_dates=["date"])
+    if not eq.empty:
+        e = eq.drop_duplicates("date", keep="last").set_index("date")
+        dd = (e["equity"] / e["equity"].cummax() - 1).rename("Drawdown from peak").to_frame()
+        m = st.columns(3)
+        m[0].metric("Equity", f"${e['equity'].iloc[-1]:,.0f}")
+        m[1].metric("Day P&L", f"{e['equity'].iloc[-1] / e['last_equity'].iloc[-1] - 1:+.2%}")
+        m[2].metric("Drawdown from peak", f"{dd.iloc[-1, 0]:.1%}")
+        if len(e) >= 2:
+            st.altair_chart(line_chart(e[["equity"]].rename(columns={"equity": "Account equity"}), "Account equity ($)",
+                                       fmt=",.0f", axis_fmt="$,.0f"), width="stretch")
+            st.altair_chart(line_chart(dd, "Drawdown from peak", fmt=".1%", axis_fmt=".0%"), width="stretch")
+        else:
+            st.caption("Charts appear once there are at least two daily equity points.")
     else:
-        st.caption("Charts appear once there are at least two daily equity points.")
-else:
-    st.caption("No live equity history yet.")
+        st.caption("No live equity history yet.")
 
-st.subheader("Backtest: out-of-sample equity vs benchmarks (after costs)")
-bt = _read_csv(art / "backtest_equity.csv", index_col=0, parse_dates=True)
-if not bt.empty:
-    bt.index.name = "date"
-    st.altair_chart(line_chart(bt / bt.iloc[0], "Growth of $1 (log scale)", log=True, axis_fmt="$.1f"), width="stretch")
-    bdd = _read_csv(art / "backtest_drawdown.csv", index_col=0, parse_dates=True)
-    if not bdd.empty:
-        bdd.index.name = "date"
-        st.altair_chart(line_chart(bdd, "Drawdown from peak", fmt=".1%", axis_fmt=".0%"), width="stretch")
-    summ = _read_csv(art / "backtest_summary.csv", index_col=0)
-    if not summ.empty:
-        cols = [c for c in ["CAGR", "Sharpe", "Sharpe95_lo", "Sharpe95_hi", "Sortino", "MaxDD", "Turnover/yr",
-                            "Exposure", "HitRate(days)"] if c in summ]
-        pct = {"CAGR", "MaxDD", "Exposure", "HitRate(days)"}
-        st.dataframe(summ[cols].style.format({c: ("{:.1%}" if c in pct else "{:.2f}") for c in cols}), width="stretch")
-    rep = state_dir / "reports" / "backtest_report.md"
-    if rep.exists():
-        with st.expander("Full backtest report (gate, model quality, sensitivity grids)"):
-            st.markdown(rep.read_text())
-else:
-    st.caption("No backtest artifacts yet. Run the `validate` workflow or `scripts/backtest_report.py`.")
+    st.subheader("Backtest: out-of-sample equity vs benchmarks (after costs)")
+    bt = _read_csv(art / "backtest_equity.csv", index_col=0, parse_dates=True)
+    if not bt.empty:
+        bt.index.name = "date"
+        st.altair_chart(line_chart(bt / bt.iloc[0], "Growth of $1 (log scale)", log=True, axis_fmt="$.1f"), width="stretch")
+        bdd = _read_csv(art / "backtest_drawdown.csv", index_col=0, parse_dates=True)
+        if not bdd.empty:
+            bdd.index.name = "date"
+            st.altair_chart(line_chart(bdd, "Drawdown from peak", fmt=".1%", axis_fmt=".0%"), width="stretch")
+        summ = _read_csv(art / "backtest_summary.csv", index_col=0)
+        if not summ.empty:
+            cols = [c for c in ["CAGR", "Sharpe", "Sharpe95_lo", "Sharpe95_hi", "Sortino", "MaxDD", "Turnover/yr",
+                                "Exposure", "HitRate(days)"] if c in summ]
+            pct = {"CAGR", "MaxDD", "Exposure", "HitRate(days)"}
+            st.dataframe(summ[cols].style.format({c: ("{:.1%}" if c in pct else "{:.2f}") for c in cols}), width="stretch")
+        rep = state_dir / "reports" / "backtest_report.md"
+        if rep.exists():
+            with st.expander("Full backtest report (gate, model quality, sensitivity grids)"):
+                st.markdown(rep.read_text())
+    else:
+        st.caption("No backtest artifacts yet. Run the `validate` workflow or `scripts/backtest_report.py`.")
 
-# ------------------------------------------------------------------------------- trades
-st.subheader("Recent trades")
-tr = _read_csv(state_dir / "trades.csv")
-if not tr.empty:
-    st.dataframe(tr.tail(25).iloc[::-1], width="stretch", hide_index=True)
-else:
-    st.caption("No trades yet.")
-st.subheader("Recent signals")
-sg = _read_csv(state_dir / "signals.csv")
-if not sg.empty:
-    st.dataframe(sg.tail(15).iloc[::-1], width="stretch", hide_index=True)
+with tab_trades:
+    # ------------------------------------------------------------------------------- trades
+    st.subheader("Recent trades")
+    tr = _read_csv(state_dir / "trades.csv")
+    if not tr.empty:
+        st.dataframe(tr.tail(25).iloc[::-1], width="stretch", hide_index=True)
+    else:
+        st.caption("No trades yet.")
+    st.subheader("Recent signals")
+    sg = _read_csv(state_dir / "signals.csv")
+    if not sg.empty:
+        st.dataframe(sg.tail(15).iloc[::-1], width="stretch", hide_index=True)
