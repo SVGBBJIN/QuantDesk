@@ -23,10 +23,12 @@ jobs:
       ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
       ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: main
-      - uses: actions/setup-python@v5
+      - name: Check Alpaca secrets are configured
+        run: .github/scripts/require_secrets.sh
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -39,5 +41,5 @@ jobs:
         if: ${{ always() }}
         run: cat state/reports/backtest_report.md >> "$GITHUB_STEP_SUMMARY" || true
       - name: Persist artifacts to data branch
-        if: ${{ always() }}
+        if: ${{ always() && hashFiles('state/README.md') != '' }}
         run: .github/scripts/commit_state.sh "weekly validation"

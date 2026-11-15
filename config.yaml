@@ -101,4 +101,6 @@ execution:
   order_type: market_on_open     # Alpaca TIF=OPG, whole shares
   opg_window_start: "19:00"      # ET; Alpaca accepts OPG orders ~19:00 -> 09:28 next session
   opg_window_end: "09:28"
+  late_run_grace_hours: 14       # scheduled runs may start up to 14h after opg_window_start (GitHub
+                                 # often delays cron jobs by hours); still capped by opg_window_end
   client_order_prefix: tqd
