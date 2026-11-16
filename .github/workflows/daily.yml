@@ -1,16 +1,21 @@
 name: daily-trade
 
 # Runs after the US close on trading days. Actions cron is UTC and ignores DST, so several crons
-# fire; the script itself exits early unless it is a session day after 19:00 ET (when Alpaca accepts
-# market-on-open orders) and the session has not already been processed (idempotent).
+# fire; the script itself exits early unless it is between 19:00 ET on a session day and 09:00 ET the
+# next morning (Alpaca accepts market-on-open orders 19:00 -> 09:28) and the session has not already
+# been processed (idempotent), so late or duplicate firings are harmless.
 #   23:37 UTC = 19:37 EDT (summer) / 18:37 EST (winter -> skipped as too early)
 #   00:37 UTC = 20:37 EDT          / 19:37 EST
 #   02:37 UTC = 22:37 EDT          / 21:37 EST  (backup if Actions delays the earlier runs)
+#   05:37 UTC = 01:37 EDT          / 00:37 EST  (backup: Actions cron is often hours late)
+#   08:37 UTC = 04:37 EDT          / 03:37 EST  (last backup; runs are accepted until 09:00 ET)
 on:
   schedule:
     - cron: "37 23 * * 1-5"
     - cron: "37 0 * * 2-6"
     - cron: "37 2 * * 2-6"
+    - cron: "37 5 * * 2-6"
+    - cron: "37 8 * * 2-6"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -48,10 +53,12 @@ jobs:
       ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
       ALPACA_LIVE: ${{ vars.ALPACA_LIVE || 'false' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: main
-      - uses: actions/setup-python@v5
+      - name: Check Alpaca secrets are configured
+        run: .github/scripts/require_secrets.sh
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -69,5 +76,5 @@ jobs:
           [ "${{ vars.I_UNDERSTAND_THE_RISK }}" = "true" ] && ARGS="$ARGS --i-understand-the-risk"
           python -m tqqq_desk.run_daily $ARGS
       - name: Persist state to data branch
-        if: ${{ always() }}
+        if: ${{ always() && hashFiles('state/README.md') != '' }}
         run: .github/scripts/commit_state.sh "daily run"

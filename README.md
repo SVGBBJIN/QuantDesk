@@ -98,6 +98,12 @@ so the bot can push to the `data` branch. If you protect branches, exempt `data`
    position reconciliation will (correctly) halt.
 5. From then on the schedule runs by itself every trading day after the close.
 
+If the secrets are missing, both scheduled workflows stop at the first step with
+"Alpaca secrets not configured" and a link to the settings page. GitHub often starts cron jobs hours
+late, so `daily-trade` fires five times a night. A run counts from 19:00 ET until 09:00 ET the next
+morning (`execution.late_run_grace_hours`, inside Alpaca's 19:00→09:28 market-on-open window). Each
+session is processed once, so extra firings do nothing.
+
 Local equivalents:
 ```bash
 python scripts/backtest_report.py                         # needs ALPACA_KEY/SECRET
@@ -174,6 +180,13 @@ It shows a PAPER/LIVE banner, kill-switch state, whether ML or the rule fallback
 today's regime and probabilities with a plain-language reason, current position and target, data and
 model freshness, live equity and drawdown, OOS backtest equity vs benchmarks, drawdowns, recent trades and signals,
 split across tabs (Live market / Decision & freshness / Performance / Trades & signals).
+
+### Status page (Vercel)
+`index.html` at the repo root is a static, read-only status page for the Vercel deployment (Streamlit
+cannot run on Vercel). In the browser it reads the bot state from the public `data` branch and the
+latest workflow runs from the GitHub API. It shows job results, the PAPER/LIVE banner, kill switch,
+model mode, the latest decision, equity and recent trades/signals. It needs no build step and no keys.
+Keep this file. Without it the Vercel URL returns 404.
 
 ### Live market data
 Data-only, never places orders.

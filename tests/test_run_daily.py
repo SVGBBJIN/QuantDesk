@@ -53,6 +53,20 @@ def test_skips_when_market_closed_or_wrong_time(cfg, tmp_path, bars_fri):
     assert not b.orders
 
 
+def test_late_cron_after_midnight_still_trades(cfg, tmp_path, bars_fri):
+    # GitHub Actions cron delayed past midnight ET: Friday's signal must still go out for Monday's open
+    b = FakeBroker()
+    r = go(bull_cfg(cfg), tmp_path, b, bars_fri, now=pd.Timestamp("2024-07-06 04:22", tz=ET))
+    assert r.status == "traded" and r.signal_date == "2024-07-05" and len(b.orders) == 1
+
+
+def test_too_late_run_is_skipped(cfg, tmp_path, bars_fri):
+    # past the late-run grace (19:00 + 14h = 09:00 next day) a scheduled run does nothing
+    b = FakeBroker()
+    r = go(bull_cfg(cfg), tmp_path, b, bars_fri, now=pd.Timestamp("2024-07-06 09:30", tz=ET))
+    assert r.status == "skipped" and not b.orders
+
+
 def test_full_cycle_idempotent_and_reconciled(cfg, tmp_path, bars_fri, bars_mon):
     c = bull_cfg(cfg)
     b = FakeBroker()

@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QuantDesk status</title>
+<meta name="description" content="Live status of the tqqq-desk trading bot: scheduled jobs, risk, decision, equity and trades.">
+<!--
+  Static status page for Vercel (the Streamlit dashboard cannot run there).
+  Everything is read in the browser from public sources:
+    - bot state: the `data` branch, via raw.githubusercontent.com (CDN-cached ~5 min)
+    - job runs:  the GitHub Actions REST API (unauthenticated, 60 requests/hour per visitor IP)
+-->
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --text: #14181f; --muted: #5f6775; --border: #e3e6eb;
+    --accent: #2563eb; --ok: #15803d; --ok-bg: #e8f5ec; --warn: #a15c00; --warn-bg: #fff4e0;
+    --bad: #b91c1c; --bad-bg: #fdecec; --paper: #1d4ed8; --live: #c62828;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1116; --card: #161b22; --text: #e6e8eb; --muted: #949cab; --border: #2a313c;
+      --accent: #5b9bff; --ok: #4ccb78; --ok-bg: #12261a; --warn: #f0b44c; --warn-bg: #2a2111;
+      --bad: #ff7b78; --bad-bg: #2c1515; --paper: #3b6fe0; --live: #d84040;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  a { color: var(--accent); }
+  header { display: flex; flex-wrap: wrap; gap: 8px 16px; justify-content: space-between; align-items: center;
+    padding: 14px 16px; border-bottom: 1px solid var(--border); background: var(--card); }
+  header h1 { font-size: 18px; margin: 0; }
+  header .meta { color: var(--muted); font-size: 13px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; display: grid; gap: 16px; }
+  .banner { border-radius: 10px; padding: 12px 16px; font-weight: 700; font-size: 18px; text-align: center; color: #fff; }
+  .banner.paper { background: var(--paper); } .banner.live { background: var(--live); }
+  .grid2 { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .stats { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin-bottom: 8px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; min-width: 0; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  .label { color: var(--muted); font-size: 13px; }
+  .value { font-size: 22px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .note { border-radius: 8px; padding: 10px 12px; font-size: 14px; }
+  .note.ok { background: var(--ok-bg); color: var(--ok); }
+  .note.warn { background: var(--warn-bg); color: var(--warn); }
+  .note.bad { background: var(--bad-bg); color: var(--bad); }
+  .note.info { background: var(--bg); color: var(--text); }
+  .muted { color: var(--muted); font-size: 13px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .pill.success { background: var(--ok-bg); color: var(--ok); }
+  .pill.failure, .pill.timed_out, .pill.startup_failure { background: var(--bad-bg); color: var(--bad); }
+  .pill.other { background: var(--warn-bg); color: var(--warn); }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 14px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td.wrap { white-space: normal; min-width: 220px; }
+  th { color: var(--muted); font-weight: 500; font-size: 13px; }
+  tr:last-child td { border-bottom: 0; }
+  svg { width: 100%; height: auto; display: block; }
+  .line { fill: none; stroke: var(--accent); stroke-width: 2; }
+  .area { fill: var(--accent); opacity: .12; }
+  .gridline { stroke: var(--border); stroke-width: 1; }
+  .tick { fill: var(--muted); font-size: 11px; }
+  footer { text-align: center; color: var(--muted); font-size: 12px; padding: 4px 16px 24px; }
+  button { font: inherit; font-size: 13px; padding: 4px 12px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text); cursor: pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1>QuantDesk · tqqq-desk</h1>
+  <div class="meta"><span id="loaded">Loading…</span> <button id="reload" type="button">Reload</button></div>
+</header>
+<main>
+  <div id="banner" class="banner paper">PAPER TRADING</div>
+
+  <section class="card">
+    <h2>Scheduled jobs (GitHub Actions)</h2>
+    <div id="jobs" class="table-wrap"><span class="muted">Loading…</span></div>
+  </section>
+
+  <div id="setup"></div>
+
+  <div class="grid2">
+    <section class="card"><h2>Risk status</h2><div id="risk"></div></section>
+    <section class="card"><h2>Model</h2><div id="model"></div></section>
+  </div>
+
+  <section class="card">
+    <h2>Latest decision</h2>
+    <div id="decision"></div>
+  </section>
+
+  <section class="stats" id="fresh"></section>
+
+  <section class="card">
+    <h2>Account equity</h2>
+    <div id="equity"></div>
+  </section>
+
+  <section class="card">
+    <h2>Recent trades</h2>
+    <div id="trades" class="table-wrap"></div>
+  </section>
+
+  <section class="card">
+    <h2>Recent signals</h2>
+    <div id="signals" class="table-wrap"></div>
+  </section>
+</main>
+<footer>
+  Read-only view of the <code>data</code> branch. Bot state can lag up to ~5 minutes (GitHub CDN cache).
+  Full interactive dashboard: <code>streamlit run dashboard/app.py</code>.
+  · <a href="https://github.com/SVGBBJIN/QuantDesk">Repository</a>
+</footer>
+
+<script>
+const REPO = "SVGBBJIN/QuantDesk";
+const RAW = `https://raw.githubusercontent.com/${REPO}/data/`;
+const API = `https://api.github.com/repos/${REPO}`;
+const WORKFLOWS = [["daily.yml", "Daily trade"], ["validate.yml", "Weekly validation"], ["ci.yml", "Tests (CI)"]];
+
+const $ = id => document.getElementById(id);
+function el(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.className = v; else e.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null) e.append(k instanceof Node ? k : String(k));
+  return e;
+}
+const note = (kind, ...kids) => el("div", { class: `note ${kind}` }, ...kids);
+
+async function getText(path) {
+  try {
+    const r = await fetch(RAW + path, { cache: "no-store" });
+    return r.ok ? await r.text() : null;
+  } catch { return null; }
+}
+async function getJSON(path) {
+  const t = await getText(path);
+  try { return t ? JSON.parse(t) : null; } catch { return null; }
+}
+
+// RFC-4180-ish CSV parser (handles quoted fields with commas / quotes / newlines)
+function parseCSV(text) {
+  const rows = []; let row = [], f = "", q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"' && text[i + 1] === '"') { f += '"'; i++; }
+      else if (c === '"') q = false;
+      else f += c;
+    } else if (c === '"') q = true;
+    else if (c === ",") { row.push(f); f = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(f); f = ""; if (row.some(x => x !== "")) rows.push(row); row = [];
+    } else f += c;
+  }
+  row.push(f); if (row.some(x => x !== "")) rows.push(row);
+  if (!rows.length) return [];
+  const head = rows.shift();
+  return rows.map(r => Object.fromEntries(head.map((h, i) => [h, r[i] ?? ""])));
+}
+async function getCSV(path) { const t = await getText(path); return t ? parseCSV(t) : []; }
+
+function age(iso) {
+  if (!iso) return "—";
+  const t = new Date(iso); if (isNaN(t)) return String(iso);
+  const s = (Date.now() - t) / 1000;
+  if (s < 90) return "just now";
+  if (s < 5400) return `${Math.round(s / 60)} min ago`;
+  if (s < 172800) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} days ago`;
+}
+const money = x => isFinite(x) ? x.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 }) : "—";
+const pct = (x, d = 1) => isFinite(x) ? `${(x * 100).toFixed(d)}%` : "—";
+
+function table(rows, cols, wrapCols = []) {
+  if (!rows.length) return null;
+  cols = cols.filter(c => rows.some(r => r[c] !== undefined && r[c] !== ""));
+  return el("table", {},
+    el("thead", {}, el("tr", {}, cols.map(c => el("th", {}, c)))),
+    el("tbody", {}, rows.map(r => el("tr", {}, cols.map(c => el("td", wrapCols.includes(c) ? { class: "wrap" } : {}, r[c] ?? ""))))));
+}
+
+// ------------------------------------------------------------------ jobs
+async function renderJobs() {
+  const box = $("jobs");
+  const results = await Promise.all(WORKFLOWS.map(async ([file, name]) => {
+    try {
+      const r = await fetch(`${API}/actions/workflows/${file}/runs?per_page=1&exclude_pull_requests=true`);
+      if (r.status === 403) return { name, error: "GitHub API rate limit reached; try again later" };
+      if (!r.ok) return { name, error: `HTTP ${r.status}` };
+      const j = await r.json();
+      return { name, run: (j.workflow_runs || [])[0] };
+    } catch (e) { return { name, error: "unreachable" }; }
+  }));
+  const rows = results.map(({ name, run, error }) => {
+    if (error || !run) return el("tr", {}, el("td", {}, name), el("td", { colspan: 3 }, error || "no runs yet"));
+    const concl = run.status === "completed" ? (run.conclusion || "unknown") : run.status;
+    const cls = ["success", "failure", "timed_out", "startup_failure"].includes(concl) ? concl : "other";
+    return el("tr", {},
+      el("td", {}, name),
+      el("td", {}, el("span", { class: `pill ${cls}` }, concl.replace("_", " "))),
+      el("td", {}, `${age(run.run_started_at || run.created_at)} (${run.event})`),
+      el("td", {}, el("a", { href: run.html_url, target: "_blank", rel: "noopener" }, "logs")));
+  });
+  box.replaceChildren(el("table", {},
+    el("thead", {}, el("tr", {}, ["Job", "Last result", "When", ""].map(h => el("th", {}, h)))),
+    el("tbody", {}, rows)));
+  return results;
+}
+
+// ------------------------------------------------------------------ equity chart
+function equityChart(pts, width) {
+  // drawn at the container's pixel width so axis labels stay readable on phones
+  const W = Math.max(280, Math.round(width || 800)), H = 240, P = { l: 64, r: 12, t: 12, b: 26 };
+  const ys = pts.map(p => p.y), lo = Math.min(...ys), hi = Math.max(...ys);
+  const pad = (hi - lo) * 0.08 || Math.max(hi * 0.01, 1);
+  const y0 = lo - pad, y1 = hi + pad;
+  const X = i => P.l + (W - P.l - P.r) * (pts.length === 1 ? 0.5 : i / (pts.length - 1));
+  const Y = v => P.t + (H - P.t - P.b) * (1 - (v - y0) / (y1 - y0));
+  const ns = "http://www.w3.org/2000/svg";
+  const s = document.createElementNS(ns, "svg");
+  s.setAttribute("viewBox", `0 0 ${W} ${H}`); s.setAttribute("role", "img");
+  s.setAttribute("aria-label", "Account equity over time");
+  const add = (tag, a, text) => { const n = document.createElementNS(ns, tag);
+    for (const [k, v] of Object.entries(a)) n.setAttribute(k, v); if (text) n.textContent = text; s.append(n); };
+  for (let k = 0; k <= 4; k++) {
+    const v = y0 + (y1 - y0) * k / 4, y = Y(v);
+    add("line", { x1: P.l, x2: W - P.r, y1: y, y2: y, class: "gridline" });
+    add("text", { x: P.l - 8, y: y + 4, "text-anchor": "end", class: "tick" }, money(v));
+  }
+  const d = pts.map((p, i) => `${i ? "L" : "M"}${X(i).toFixed(1)},${Y(p.y).toFixed(1)}`).join("");
+  add("path", { d: `${d}L${X(pts.length - 1)},${H - P.b}L${X(0)},${H - P.b}Z`, class: "area" });
+  add("path", { d, class: "line" });
+  [0, pts.length - 1].filter((v, i, a) => a.indexOf(v) === i).forEach(i =>
+    add("text", { x: X(i), y: H - 6, "text-anchor": i ? "end" : "start", class: "tick" }, pts[i].x));
+  return s;
+}
+
+// ------------------------------------------------------------------ main
+async function load() {
+  $("loaded").textContent = "Loading…";
+  const [jobs, state, status, equity, trades, signals] = await Promise.all([
+    renderJobs(), getJSON("state.json"), getJSON("artifacts/model_status.json"),
+    getCSV("equity.csv"), getCSV("trades.csv"), getCSV("signals.csv"),
+  ]);
+  const st = state || {};
+
+  // banner
+  const live = (st.mode || "paper").toLowerCase() === "live";
+  $("banner").className = `banner ${live ? "live" : "paper"}`;
+  $("banner").textContent = live ? "LIVE TRADING · REAL MONEY" : "PAPER TRADING";
+
+  // first-run / setup hint
+  const daily = jobs[0];
+  const setup = [];
+  if (daily && daily.run && daily.run.conclusion === "failure")
+    setup.push(note("bad", "The last daily run failed. Open its ",
+      el("a", { href: daily.run.html_url, target: "_blank", rel: "noopener" }, "logs"),
+      ". If it says the Alpaca secrets are missing, add ALPACA_KEY and ALPACA_SECRET under ",
+      el("a", { href: `https://github.com/${REPO}/settings/secrets/actions`, target: "_blank", rel: "noopener" },
+        "Settings → Secrets and variables → Actions"), "."));
+  if (!state)
+    setup.push(note("info", "No bot state yet: the daily job has not completed a run. ",
+      "It writes state.json to the data branch after the first successful run (weekdays after 19:00 ET)."));
+  $("setup").replaceChildren(...setup.map(n => el("div", { class: "card" }, n)));
+
+  // risk
+  const ks = st.kill_switch || {}, last = st.last_decision || {};
+  $("risk").replaceChildren(
+    !state ? note("info", "Waiting for the first run.")
+    : ks.tripped ? note("bad", `KILL SWITCH TRIPPED (${ks.action || "?"}) at ${ks.tripped_at || "?"}. ${ks.reason || ""} ` +
+                             "Trading is halted until a manual run with reset_kill_switch.")
+    : last.halted ? note("warn", "Last run halted (not latched): " + (last.halt_reasons || []).join("; "))
+    : note("ok", "Kill switch armed, not tripped"));
+
+  // model
+  const m = st.model || {}, s = status || {};
+  const mmode = m.mode || s.mode || "RULE";
+  $("model").replaceChildren(mmode === "ML"
+    ? note("ok", "ML ensemble active: it passed the out-of-sample gate")
+    : note("warn", "Rule-based fallback active. " + (m.message || s.message || "No validation has been run yet.")));
+
+  // decision
+  const d = last, exp = st.expected_positions || {};
+  if (!Object.keys(d).length) {
+    $("decision").replaceChildren(el("span", { class: "muted" }, "No decision yet."));
+  } else {
+    const tgt = d.target == null ? "frozen (halt)"
+      : Object.entries(d.target).map(([k, w]) => `${k} ${pct(w, 0)}`).join(", ") || "CASH";
+    const fp = x => x == null ? "n/a (rule mode)" : Number(x).toFixed(2);
+    const pos = Object.entries(exp).map(([k, q]) => `${k}: ${q} sh`).join(", ") || "CASH";
+    const kids = [
+      el("div", { class: "table-wrap" }, table([{
+        "Signal session": d.signal_date || "—", "Regime": d.regime || "—", "P(up, 5d)": fp(d.p_up),
+        "P(high vol, 5d)": fp(d.p_hivol), "Model": d.model_mode || "—", "Target": tgt,
+      }], ["Signal session", "Regime", "P(up, 5d)", "P(high vol, 5d)", "Model", "Target"])),
+      el("p", {}, el("strong", {}, "Position after pending orders fill: "), pos),
+    ];
+    if (d.orders && d.orders.length)
+      kids.push(el("p", {}, el("strong", {}, "Orders submitted (market-on-open): "),
+        d.orders.map(o => `${String(o.side).toUpperCase()} ${o.qty} ${o.symbol}`).join("; ")));
+    kids.push(note("info", el("strong", {}, "Why: "), d.reason || "—"));
+    $("decision").replaceChildren(...kids);
+  }
+
+  // freshness
+  const stat = (label, value) => el("div", { class: "card" }, el("div", { class: "label" }, label), el("div", { class: "value" }, value));
+  $("fresh").replaceChildren(
+    stat("Last run", age(st.last_run_at)),
+    stat("Last daily bar", st.data_last_bar || "—"),
+    stat("Model validated", age(m.validated_at || s.validated_at)),
+    stat("Model trained through", m.trained_through || "—"));
+
+  // equity
+  const byDate = new Map();
+  for (const r of equity) if (r.date && isFinite(+r.equity)) byDate.set(r.date.slice(0, 10), r);
+  const eq = [...byDate.values()];
+  if (!eq.length) {
+    $("equity").replaceChildren(el("span", { class: "muted" }, "No equity history yet."));
+  } else {
+    const lastR = eq[eq.length - 1], e = +lastR.equity, prev = +lastR.last_equity;
+    const peak = Math.max(...eq.map(r => +r.equity));
+    const dayCls = e >= prev ? "ok" : "bad";
+    const kids = [el("div", { class: "stats" },
+      el("div", {}, el("div", { class: "label" }, "Equity"), el("div", { class: "value" }, money(e))),
+      el("div", {}, el("div", { class: "label" }, "Day P&L"),
+        el("div", { class: "value", style: `color: var(--${dayCls})` }, prev ? `${e >= prev ? "+" : ""}${pct(e / prev - 1, 2)}` : "—")),
+      el("div", {}, el("div", { class: "label" }, "Drawdown from peak"), el("div", { class: "value" }, pct(e / peak - 1))))];
+    if (eq.length >= 2) kids.push(equityChart(eq.map(r => ({ x: r.date.slice(0, 10), y: +r.equity })), $("equity").clientWidth));
+    else kids.push(el("p", { class: "muted" }, "The chart appears once there are two daily equity points."));
+    $("equity").replaceChildren(...kids);
+  }
+
+  // trades / signals
+  $("trades").replaceChildren(table(trades.slice(-25).reverse(),
+    ["ts", "signal_date", "event", "symbol", "side", "qty", "status", "filled_qty", "fill_price", "mode", "note"], ["note"])
+    || el("span", { class: "muted" }, "No trades yet."));
+  $("signals").replaceChildren(table(signals.slice(-15).reverse(),
+    ["signal_date", "regime", "p_up", "p_hivol", "model_mode", "state", "w_TQQQ", "w_SQQQ", "target_symbol", "target_qty", "halted", "reason"], ["reason"])
+    || el("span", { class: "muted" }, "No signals yet."));
+
+  $("loaded").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+}
+
+$("reload").addEventListener("click", load);
+load();
+</script>
+</body>
+</html>

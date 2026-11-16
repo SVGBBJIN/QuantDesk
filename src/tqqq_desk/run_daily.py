@@ -112,7 +112,11 @@ def run(cfg, *, now: pd.Timestamp, broker, bars_loader, state_dir: Path, artifac
     eh, em = map(int, cfg["execution"]["opg_window_end"].split(":"))
     win_start = pd.Timestamp(dt.datetime.combine(signal_date, dt.time(hh, mm)), tz=ET)
     win_end = pd.Timestamp(dt.datetime.combine(mktcal.next_session(signal_date), dt.time(eh, em)), tz=ET)
-    scheduled_ok = now_et.date() == signal_date and now_et >= win_start
+    # GitHub Actions cron often fires hours late, past midnight ET. Accept any run from the window
+    # start until `late_run_grace_hours` later (still inside the OPG window), not just same-day runs.
+    grace = pd.Timedelta(hours=float(cfg["execution"].get("late_run_grace_hours", 0)))
+    late_cutoff = max(win_start + grace, pd.Timestamp(dt.datetime.combine(signal_date, dt.time(23, 59, 59)), tz=ET))
+    scheduled_ok = win_start <= now_et <= late_cutoff
     in_window = win_start <= now_et < win_end
     if not force and not scheduled_ok:
         why = ("market closed today" if not mktcal.is_session(now_et.date())
