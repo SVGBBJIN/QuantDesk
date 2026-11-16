@@ -4,7 +4,6 @@ import pytest
 
 from tqqq_desk.data import synthetic_bars
 from tqqq_desk.features import build_features, make_labels
-from tqqq_desk.gate import evaluate_gate
 from tqqq_desk.validation import oos_scores, walk_forward_predict, walk_forward_splits
 
 
@@ -54,17 +53,6 @@ def test_positive_control_detects_real_signal(cfg):
     assert s["p_up_auc"] > 0.75
     # calibration: mean predicted prob close to realised frequency
     assert abs(p["p_up"].mean() - y["y_up"].reindex(p.index).mean()) < 0.05
-
-
-def test_gate_pass_and_fail(cfg):
-    rng = np.random.default_rng(0)
-    bench = pd.Series(rng.normal(0.0004, 0.02, 1500))
-    good = bench * 0.6 + 0.0008 + rng.normal(0, 0.003, 1500)
-    bad = bench - 0.0006 + rng.normal(0, 0.01, 1500)                  # same risk, less return
-    g1 = evaluate_gate(good, bench, cfg)
-    assert g1["passed"] and g1["mode"] == "ML"
-    g2 = evaluate_gate(bad, bench, cfg)
-    assert not g2["passed"] and g2["mode"] == "RULE" and "RULE-BASED" in g2["message"]
 
 
 def test_plateau_prefers_stable_interior_over_spike():

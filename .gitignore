@@ -9,3 +9,4 @@ artifacts/
 reports/*.csv
 .env
 *.log
+data/proxy/

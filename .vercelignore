@@ -1,0 +1,9 @@
+.venv
+.github
+tests
+dashboard
+data
+state
+artifacts
+reports
+**/__pycache__

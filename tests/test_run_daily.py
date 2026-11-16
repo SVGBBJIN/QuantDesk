@@ -36,9 +36,14 @@ def go(cfg, tmp_path, broker, bars, now=FRI, **kw):
                artifacts_dir=tmp_path / "artifacts", mode="paper", **kw)
 
 
-def bull_cfg(cfg):
-    # make the rule regime definitely long on the synthetic path, to exercise order flow
-    return cfg.copy_with({"fallback.long_regimes": ["BULL", "NEUTRAL", "HIGH_VOL", "BEAR"]})
+def bull_cfg(cfg, tmp_path):
+    """Validated status selecting the test-only `always_long` strategy, to exercise order flow."""
+    art = tmp_path / "artifacts"
+    art.mkdir(exist_ok=True)
+    (art / "model_status.json").write_text(json.dumps({
+        "active_strategy": "always_long", "mode": "RULE", "data_source": "ALPACA",
+        "validated_at": FRI.tz_convert("UTC").isoformat(), "config_hash": config_hash(cfg)}))
+    return cfg
 
 
 def test_skips_when_market_closed_or_wrong_time(cfg, tmp_path, bars_fri):
@@ -56,19 +61,19 @@ def test_skips_when_market_closed_or_wrong_time(cfg, tmp_path, bars_fri):
 def test_late_cron_after_midnight_still_trades(cfg, tmp_path, bars_fri):
     # GitHub Actions cron delayed past midnight ET: Friday's signal must still go out for Monday's open
     b = FakeBroker()
-    r = go(bull_cfg(cfg), tmp_path, b, bars_fri, now=pd.Timestamp("2024-07-06 04:22", tz=ET))
+    r = go(bull_cfg(cfg, tmp_path), tmp_path, b, bars_fri, now=pd.Timestamp("2024-07-06 04:22", tz=ET))
     assert r.status == "traded" and r.signal_date == "2024-07-05" and len(b.orders) == 1
 
 
 def test_too_late_run_is_skipped(cfg, tmp_path, bars_fri):
     # past the late-run grace (19:00 + 14h = 09:00 next day) a scheduled run does nothing
     b = FakeBroker()
-    r = go(bull_cfg(cfg), tmp_path, b, bars_fri, now=pd.Timestamp("2024-07-06 09:30", tz=ET))
+    r = go(bull_cfg(cfg, tmp_path), tmp_path, b, bars_fri, now=pd.Timestamp("2024-07-06 09:30", tz=ET))
     assert r.status == "skipped" and not b.orders
 
 
 def test_full_cycle_idempotent_and_reconciled(cfg, tmp_path, bars_fri, bars_mon):
-    c = bull_cfg(cfg)
+    c = bull_cfg(cfg, tmp_path)
     b = FakeBroker()
     r = go(c, tmp_path, b, bars_fri)
     assert r.status == "traded" and len(r.orders) == 1 and r.orders[0]["side"] == "buy"
@@ -110,17 +115,17 @@ def test_daily_loss_flattens(cfg, tmp_path, bars_fri):
     st["peak_equity"] = 100_000
     store.save(st)
     b = FakeBroker(pos={"TQQQ": 1000}, equity=90_000, last_equity=100_000)
-    r = go(bull_cfg(cfg), tmp_path, b, bars_fri)
+    r = go(bull_cfg(cfg, tmp_path), tmp_path, b, bars_fri)
     assert r.status == "halted"
     assert [(o["symbol"], o["side"], o["qty"]) for o in r.orders] == [("TQQQ", "sell", 1000)]
     s = store.load()
     assert s["kill_switch"]["tripped"] and s["position"]["position"] == "CASH"
     # still latched next session -> no new buys even though the signal is long
     b.fill_open_orders({"TQQQ": 50.0}); b.mark({"TQQQ": 50.0})
-    r2 = go(bull_cfg(cfg), tmp_path, b, bars_until("2024-07-08"), now=MON)
+    r2 = go(bull_cfg(cfg, tmp_path), tmp_path, b, bars_until("2024-07-08"), now=MON)
     assert r2.status == "halted" and not [o for o in r2.orders if o["side"] == "buy"]
     # manual reset re-enables trading
-    r3 = go(bull_cfg(cfg), tmp_path, b, bars_until("2024-07-09"), now=MON + pd.Timedelta(days=1),
+    r3 = go(bull_cfg(cfg, tmp_path), tmp_path, b, bars_until("2024-07-09"), now=MON + pd.Timedelta(days=1),
             reset_kill_switch=True)
     assert r3.status == "traded"
 
@@ -138,7 +143,7 @@ def test_stale_data_halts_without_advancing(cfg, tmp_path, bars_fri):
 
 def test_dry_run_submits_nothing(cfg, tmp_path, bars_fri):
     b = FakeBroker()
-    r = go(bull_cfg(cfg), tmp_path, b, bars_fri, dry_run=True)
+    r = go(bull_cfg(cfg, tmp_path), tmp_path, b, bars_fri, dry_run=True)
     assert r.status == "dry_run" and r.orders and not b.orders
     assert StateStore(tmp_path).load()["last_signal_date"] is None
     assert (tmp_path / "last_dry_run.json").exists()
@@ -157,6 +162,24 @@ def test_ml_mode_used_only_with_valid_status(cfg, tmp_path, bars_fri):
     c2 = cfg.copy_with({"decision.up_enter": 0.56})
     r = go(c2, tmp_path, FakeBroker(), bars_fri, dry_run=True)
     assert r.decision["model_mode"] == "RULE" and "config changed" in r.decision["model_message"]
+    assert r.decision["strategy"] == "sma200"
     # synthetic-data validation can never enable ML
     (art / "model_status.json").write_text(json.dumps(dict(status, data_source="SYNTHETIC")))
     assert go(cfg, tmp_path, FakeBroker(), bars_fri, dry_run=True).decision["model_mode"] == "RULE"
+
+
+def test_validated_rule_strategy_is_used_and_logged(cfg, tmp_path, bars_fri):
+    art = tmp_path / "artifacts"
+    art.mkdir()
+    (art / "model_status.json").write_text(json.dumps({
+        "active_strategy": "sentinel", "objective": "risk_adjusted", "data_source": "ALPACA",
+        "validated_at": FRI.tz_convert("UTC").isoformat(), "config_hash": config_hash(cfg)}))
+    r = go(cfg, tmp_path, FakeBroker(), bars_fri)
+    assert r.decision["strategy"] == "sentinel" and r.decision["reason"].startswith("sentinel:")
+    sig = pd.read_csv(tmp_path / "signals.csv")
+    assert sig["strategy"].iloc[-1] == "sentinel"
+    # stale validation -> plain SMA200 benchmark
+    later = FRI + pd.Timedelta(days=30)
+    from tqqq_desk.run_daily import resolve_strategy
+    name, _, why = resolve_strategy(art, cfg, later)
+    assert name == "sma200" and "days old" in why

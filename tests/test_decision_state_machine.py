@@ -6,7 +6,7 @@ from tqqq_desk.regime import BEAR, BULL, HIGH_VOL, NEUTRAL
 
 
 def step(st, cfg, regime, p_up, p_hv=0.1, mode="ML"):
-    return decision_step(st, regime, p_up, p_hv, cfg["decision"], cfg["fallback"], mode)[0]
+    return decision_step(st, regime, p_up, p_hv, cfg["decision"], None, mode)[0]
 
 
 def test_tqqq_entry_requires_regime_prob_and_vol(cfg):
@@ -92,5 +92,5 @@ def test_never_both_and_invariants_random(cfg, seed):
 
 
 def test_reason_is_plain_language(cfg):
-    _, _, why = decision_step(PosState(), BULL, 0.52, 0.2, cfg["decision"], cfg["fallback"], "ML")
+    _, _, why = decision_step(PosState(), BULL, 0.52, 0.2, cfg["decision"], None, "ML")
     assert "P(up)=0.52 below 0.55" in why

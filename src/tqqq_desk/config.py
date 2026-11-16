@@ -66,13 +66,59 @@ def validate(cfg: Cfg) -> None:
         raise ConfigError("decision.sqqq_max_days must be >= 1")
     if cfg["validation"]["embargo"] < 0:
         raise ConfigError("validation.embargo must be >= 0")
+    validate_strategies(cfg)
     if cfg["risk"]["kill_action"] not in ("flatten", "freeze"):
         raise ConfigError("risk.kill_action must be flatten or freeze")
+
+
+def validate_strategies(cfg: Cfg) -> None:
+    from .selection import OBJECTIVES
+    from .strategies import REGISTRY
+    sel = cfg["selection"]
+    if sel["objective"] not in OBJECTIVES:
+        raise ConfigError(f"selection.objective must be one of {OBJECTIVES}")
+    for c in sel["candidates"]:
+        if c != "ml" and c not in REGISTRY:
+            raise ConfigError(f"selection.candidates: unknown strategy {c!r} (known: ml, {', '.join(REGISTRY)})")
+    if not 0 < sel["max_drawdown_cap"] < 1 or not 0.5 <= sel["min_bootstrap_prob"] < 1:
+        raise ConfigError("selection.max_drawdown_cap must be in (0,1) and min_bootstrap_prob in [0.5,1)")
+    for name, p in cfg["strategies"].items():
+        if name not in REGISTRY:
+            raise ConfigError(f"strategies.{name}: unknown strategy")
+        if not 0 < p.get("max_weight", 1.0) <= 1:
+            raise ConfigError(f"strategies.{name}.max_weight must be in (0, 1] (no leverage on top of 3x)")
+        if p.get("short_cap", 0) > 0.5:
+            raise ConfigError(f"strategies.{name}.short_cap must be <= 0.5 (SQQQ decays)")
+        if p.get("target_vol", 0.5) <= 0:
+            raise ConfigError(f"strategies.{name}.target_vol must be > 0")
+    s = cfg["strategies"]
+    if "sentinel" in s and s["sentinel"]["exit_score"] > s["sentinel"]["enter_score"]:
+        raise ConfigError("strategies.sentinel.exit_score must be <= enter_score (hysteresis)")
+    if "accelerator" in s:
+        a = s["accelerator"]
+        if not 0 < a["dd_soft"] < 1 or not 0 < a["dd_cap"] < 1 or not 0 <= a["dd_floor_mult"] <= 1:
+            raise ConfigError("strategies.accelerator: dd_cap, dd_soft in (0,1), dd_floor_mult in [0,1]")
+        if a["band_out"] < -a["band_in"]:
+            raise ConfigError("strategies.accelerator.band_out must be >= -band_in (hysteresis)")
+
+
+ENV_OVERRIDES = {"QD_OBJECTIVE": ("selection", "objective")}
+
+
+def apply_env_overrides(cfg: Cfg, env=None) -> None:
+    """A few choices can be made from environment variables (e.g. Vercel project settings) without a
+    commit. They become part of the config (and its hash), so validation and trading must agree."""
+    import os
+    env = os.environ if env is None else env
+    for var, (sec, key) in ENV_OVERRIDES.items():
+        if env.get(var):
+            cfg[sec][key] = env[var].strip()
 
 
 def load_config(path: str | Path | None = None) -> Cfg:
     p = Path(path) if path else DEFAULT_PATH
     with open(p) as f:
         cfg = Cfg(yaml.safe_load(f))
+    apply_env_overrides(cfg)
     validate(cfg)
     return cfg

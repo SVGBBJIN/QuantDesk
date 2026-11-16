@@ -1,21 +1,10 @@
 name: daily-trade
 
-# Runs after the US close on trading days. Actions cron is UTC and ignores DST, so several crons
-# fire; the script itself exits early unless it is between 19:00 ET on a session day and 09:00 ET the
-# next morning (Alpaca accepts market-on-open orders 19:00 -> 09:28) and the session has not already
-# been processed (idempotent), so late or duplicate firings are harmless.
-#   23:37 UTC = 19:37 EDT (summer) / 18:37 EST (winter -> skipped as too early)
-#   00:37 UTC = 20:37 EDT          / 19:37 EST
-#   02:37 UTC = 22:37 EDT          / 21:37 EST  (backup if Actions delays the earlier runs)
-#   05:37 UTC = 01:37 EDT          / 00:37 EST  (backup: Actions cron is often hours late)
-#   08:37 UTC = 04:37 EDT          / 03:37 EST  (last backup; runs are accepted until 09:00 ET)
+# MANUAL FALLBACK ONLY. The bot runs on Vercel Cron (vercel.json -> /api/cron/trade) with its
+# credentials in Vercel env vars. This workflow is kept for manual runs from GitHub (it needs the
+# ALPACA_KEY / ALPACA_SECRET repository secrets). It never runs on a schedule, so it cannot trade
+# twice alongside Vercel; both share the `data` branch state and the per-session idempotency check.
 on:
-  schedule:
-    - cron: "37 23 * * 1-5"
-    - cron: "37 0 * * 2-6"
-    - cron: "37 2 * * 2-6"
-    - cron: "37 5 * * 2-6"
-    - cron: "37 8 * * 2-6"
   workflow_dispatch:
     inputs:
       dry_run:

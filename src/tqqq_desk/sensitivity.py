@@ -1,4 +1,4 @@
-"""Threshold sensitivity grids. We report the grid and recommend the centre of the most stable
+"""ML threshold sensitivity grid (rule strategies use parameter neighbourhoods in research.py). We report the grid and recommend the centre of the most stable
 plateau (best full 3x3 neighbourhood mean Sharpe; interior cells only), NOT the single best cell. Nothing is auto-applied:
 choosing thresholds on the OOS period would itself be in-sample selection."""
 from __future__ import annotations
@@ -10,7 +10,6 @@ import pandas as pd
 
 from .backtest import run_backtest
 from .metrics import sharpe
-from .regime import classify_regimes
 from .strategy import build_signal_path, to_target_weights
 
 
@@ -34,20 +33,6 @@ def ml_grid(regime, probs, bars, cfg) -> pd.DataFrame:
                            "decision.down_enter": max(d["down_enter"], ue),
                            "decision.down_exit": max(d["down_exit"], ue - gap_up)})
         out.loc[ue, vc] = _sr(build_signal_path(regime, probs, bars, c, "ML"), bars, c)
-    return out
-
-
-def rule_grid(feats, bars, cfg, idx) -> pd.DataFrame:
-    g = cfg["sensitivity"]["rule"]
-    r = cfg["regime"]
-    gap_b, gap_h = r["bull_enter"] - r["bull_exit"], r["hv_enter"] - r["hv_exit"]
-    out = pd.DataFrame(index=pd.Index(g["bull_enter"], name="bull_enter"),
-                       columns=pd.Index(g["hv_enter"], name="hv_enter"), dtype=float)
-    for be, hv in itertools.product(g["bull_enter"], g["hv_enter"]):
-        c = cfg.copy_with({"regime.bull_enter": be, "regime.bull_exit": be - gap_b,
-                           "regime.hv_enter": hv, "regime.hv_exit": hv - gap_h})
-        sig = build_signal_path(classify_regimes(feats, c["regime"]), None, bars, c, "RULE", idx)
-        out.loc[be, hv] = _sr(sig, bars, c)
     return out
 
 
