@@ -30,9 +30,14 @@ def _fmt(x):
     return "n/a" if x is None or not np.isfinite(x) else f"{x:.2f}"
 
 
+RULE_DEFAULT = {"long_regimes": [BULL], "allow_sqqq": False}
+
+
 def decision_step(st: PosState, regime: str | None, p_up: float | None, p_hivol: float | None,
-                  d, fallback, mode: str) -> tuple[PosState, str, str]:
-    """Return (new_state, desired_before_flip_rule, plain-language reason)."""
+                  d, fallback=None, mode: str = "ML") -> tuple[PosState, str, str]:
+    """Return (new_state, desired_before_flip_rule, plain-language reason). Used by the `ml`
+    strategy; mode "RULE" is the simple regime rule (kept for tests and diagnostics)."""
+    fallback = fallback or RULE_DEFAULT
     cooldown = max(0, st.sqqq_cooldown - 1)
     reasons = []
     if regime is None:

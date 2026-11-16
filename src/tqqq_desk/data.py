@@ -69,7 +69,7 @@ def load_bars(cfg, refresh: bool = True, end: str | None = None) -> dict[str, pd
     """Fetch full history from config start (so live features match the backtest) and cache it."""
     d = cfg["data"]
     syms = all_symbols(cfg)
-    cache = Path(d["cache_dir"])
+    cache = Path(os.environ.get("QD_CACHE_DIR") or d["cache_dir"])  # serverless: only /tmp is writable
     if refresh:
         if end is None:  # free-plan SIP rejects queries touching the most recent 15 minutes
             end = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=16)).isoformat()
@@ -87,6 +87,23 @@ def load_bars(cfg, refresh: bool = True, end: str | None = None) -> dict[str, pd
     if missing:
         raise DataError(f"required symbols missing from data: {missing}")
     return bars
+
+
+def load_csv_dir(path: str | Path, cfg) -> dict[str, pd.DataFrame]:
+    """Daily bars from <SYMBOL>.csv files (index = date, columns open/high/low/close[/volume])."""
+    out = {}
+    for s in all_symbols(cfg):
+        f = Path(path) / f"{s}.csv"
+        if f.exists():
+            df = pd.read_csv(f, index_col=0, parse_dates=True)
+            if "volume" not in df:
+                df["volume"] = 0.0
+            out[s] = df[OHLCV].astype(float).sort_index()
+    d = cfg["data"]
+    missing = [s for s in [d["signal_symbol"], *d["trade_symbols"].values()] if s not in out]
+    if missing:
+        raise DataError(f"required symbols missing from {path}: {missing}")
+    return out
 
 
 def drop_incomplete(bars: dict[str, pd.DataFrame], last_session: dt.date) -> dict[str, pd.DataFrame]:

@@ -9,7 +9,8 @@
   Static status page for Vercel (the Streamlit dashboard cannot run there).
   Everything is read in the browser from public sources:
     - bot state: the `data` branch, via raw.githubusercontent.com (CDN-cached ~5 min)
-    - job runs:  the GitHub Actions REST API (unauthenticated, 60 requests/hour per visitor IP)
+    - bot runs:  runs.json on the `data` branch, written by the Vercel Cron jobs (/api/cron/*)
+    - CI runs:   the GitHub Actions REST API (unauthenticated, 60 requests/hour per visitor IP)
 -->
 <style>
   :root {
@@ -84,7 +85,7 @@
 
   <div class="grid2">
     <section class="card"><h2>Risk status</h2><div id="risk"></div></section>
-    <section class="card"><h2>Model</h2><div id="model"></div></section>
+    <section class="card"><h2>Strategy</h2><div id="model"></div></section>
   </div>
 
   <section class="card">
@@ -119,7 +120,8 @@
 const REPO = "SVGBBJIN/QuantDesk";
 const RAW = `https://raw.githubusercontent.com/${REPO}/data/`;
 const API = `https://api.github.com/repos/${REPO}`;
-const WORKFLOWS = [["daily.yml", "Daily trade"], ["validate.yml", "Weekly validation"], ["ci.yml", "Tests (CI)"]];
+const WORKFLOWS = [["ci.yml", "Tests (CI)"]];
+const VERCEL_JOBS = [["trade", "Daily trade (Vercel)"], ["validate", "Weekly validation (Vercel)"]];
 
 const $ = id => document.getElementById(id);
 function el(tag, attrs = {}, ...kids) {
@@ -189,7 +191,12 @@ function table(rows, cols, wrapCols = []) {
 // ------------------------------------------------------------------ jobs
 async function renderJobs() {
   const box = $("jobs");
-  const results = await Promise.all(WORKFLOWS.map(async ([file, name]) => {
+  const runs = (await getJSON("runs.json")) || [];
+  const vercel = VERCEL_JOBS.map(([job, name]) => {
+    const r = [...runs].reverse().find(x => x.job === job);
+    return { name, vercel: r };
+  });
+  const gh = await Promise.all(WORKFLOWS.map(async ([file, name]) => {
     try {
       const r = await fetch(`${API}/actions/workflows/${file}/runs?per_page=1&exclude_pull_requests=true`);
       if (r.status === 403) return { name, error: "GitHub API rate limit reached; try again later" };
@@ -198,7 +205,16 @@ async function renderJobs() {
       return { name, run: (j.workflow_runs || [])[0] };
     } catch (e) { return { name, error: "unreachable" }; }
   }));
-  const rows = results.map(({ name, run, error }) => {
+  const results = [...vercel, ...gh];
+  const rows = results.map(({ name, run, vercel: v, error }) => {
+    if (v) {
+      const concl = v.exit_code === 0 ? "success" : (v.status === "halted" ? "halted" : "failure");
+      return el("tr", {},
+        el("td", {}, name),
+        el("td", {}, el("span", { class: `pill ${concl === "success" ? "success" : "failure"}` }, concl)),
+        el("td", {}, `${age(v.started_at)} (cron)`),
+        el("td", { class: "wrap" }, v.summary || ""));
+    }
     if (error || !run) return el("tr", {}, el("td", {}, name), el("td", { colspan: 3 }, error || "no runs yet"));
     const concl = run.status === "completed" ? (run.conclusion || "unknown") : run.status;
     const cls = ["success", "failure", "timed_out", "startup_failure"].includes(concl) ? concl : "other";
@@ -209,7 +225,7 @@ async function renderJobs() {
       el("td", {}, el("a", { href: run.html_url, target: "_blank", rel: "noopener" }, "logs")));
   });
   box.replaceChildren(el("table", {},
-    el("thead", {}, el("tr", {}, ["Job", "Last result", "When", ""].map(h => el("th", {}, h)))),
+    el("thead", {}, el("tr", {}, ["Job", "Last result", "When", "Details"].map(h => el("th", {}, h)))),
     el("tbody", {}, rows)));
   return results;
 }
@@ -259,15 +275,13 @@ async function load() {
   // first-run / setup hint
   const daily = jobs[0];
   const setup = [];
-  if (daily && daily.run && daily.run.conclusion === "failure")
-    setup.push(note("bad", "The last daily run failed. Open its ",
-      el("a", { href: daily.run.html_url, target: "_blank", rel: "noopener" }, "logs"),
-      ". If it says the Alpaca secrets are missing, add ALPACA_KEY and ALPACA_SECRET under ",
-      el("a", { href: `https://github.com/${REPO}/settings/secrets/actions`, target: "_blank", rel: "noopener" },
-        "Settings → Secrets and variables → Actions"), "."));
+  if (daily && daily.vercel && daily.vercel.exit_code !== 0)
+    setup.push(note("bad", "The last daily run did not succeed: ", daily.vercel.summary || "see the Vercel function logs",
+      ". If it mentions missing credentials, set ALPACA_KEY, ALPACA_SECRET, CRON_SECRET and QD_GITHUB_TOKEN in the ",
+      "Vercel project → Settings → Environment Variables (Production), then redeploy."));
   if (!state)
-    setup.push(note("info", "No bot state yet: the daily job has not completed a run. ",
-      "It writes state.json to the data branch after the first successful run (weekdays after 19:00 ET)."));
+    setup.push(note("info", "No bot state yet: the Vercel cron has not completed a run. ",
+      "It writes state.json to the data branch after the first successful run (weekdays after 20:00 ET)."));
   $("setup").replaceChildren(...setup.map(n => el("div", { class: "card" }, n)));
 
   // risk
@@ -281,10 +295,12 @@ async function load() {
 
   // model
   const m = st.model || {}, s = status || {};
-  const mmode = m.mode || s.mode || "RULE";
-  $("model").replaceChildren(mmode === "ML"
-    ? note("ok", "ML ensemble active: it passed the out-of-sample gate")
-    : note("warn", "Rule-based fallback active. " + (m.message || s.message || "No validation has been run yet.")));
+  const active = m.strategy || s.active_strategy || (m.mode === "ML" ? "ml" : "sma200");
+  const objective = m.objective || s.objective || "—";
+  const msg = m.message || s.message || "No validation has been run yet.";
+  $("model").replaceChildren(active !== "sma200"
+    ? note("ok", `Strategy "${active}" active (objective: ${objective}). ${msg}`)
+    : note("warn", `SMA200 benchmark fallback active (objective: ${objective}). ${msg}`));
 
   // decision
   const d = last, exp = st.expected_positions || {};
@@ -293,13 +309,14 @@ async function load() {
   } else {
     const tgt = d.target == null ? "frozen (halt)"
       : Object.entries(d.target).map(([k, w]) => `${k} ${pct(w, 0)}`).join(", ") || "CASH";
-    const fp = x => x == null ? "n/a (rule mode)" : Number(x).toFixed(2);
+    const fp = x => x == null ? "n/a" : Number(x).toFixed(2);
     const pos = Object.entries(exp).map(([k, q]) => `${k}: ${q} sh`).join(", ") || "CASH";
     const kids = [
       el("div", { class: "table-wrap" }, table([{
         "Signal session": d.signal_date || "—", "Regime": d.regime || "—", "P(up, 5d)": fp(d.p_up),
-        "P(high vol, 5d)": fp(d.p_hivol), "Model": d.model_mode || "—", "Target": tgt,
-      }], ["Signal session", "Regime", "P(up, 5d)", "P(high vol, 5d)", "Model", "Target"])),
+        "P(high vol, 5d)": fp(d.p_hivol), "Strategy": d.strategy || d.model_mode || "—", "Target": tgt,
+      }], ["Signal session", "Regime", "P(up, 5d)", "P(high vol, 5d)", "Strategy", "Target"])),
+      el("p", { class: "muted" }, d.reason || ""),
       el("p", {}, el("strong", {}, "Position after pending orders fill: "), pos),
     ];
     if (d.orders && d.orders.length)
@@ -342,7 +359,7 @@ async function load() {
     ["ts", "signal_date", "event", "symbol", "side", "qty", "status", "filled_qty", "fill_price", "mode", "note"], ["note"])
     || el("span", { class: "muted" }, "No trades yet."));
   $("signals").replaceChildren(table(signals.slice(-15).reverse(),
-    ["signal_date", "regime", "p_up", "p_hivol", "model_mode", "state", "w_TQQQ", "w_SQQQ", "target_symbol", "target_qty", "halted", "reason"], ["reason"])
+    ["signal_date", "regime", "p_up", "p_hivol", "model_mode", "state", "w_TQQQ", "w_SQQQ", "target_symbol", "target_qty", "halted", "strategy", "reason"], ["reason"])
     || el("span", { class: "muted" }, "No signals yet."));
 
   $("loaded").textContent = `Updated ${new Date().toLocaleTimeString()}`;

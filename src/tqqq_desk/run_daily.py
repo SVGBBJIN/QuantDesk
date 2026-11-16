@@ -27,6 +27,8 @@ from .logutil import setup_logging
 from .models import Ensemble
 from .regime import classify_regimes
 from .report import config_hash
+from .selection import FALLBACK
+from .strategies import LONG, REGISTRY, make_inputs, run_path
 from .risk import evaluate_kill_switch
 from .state import StateStore
 from .strategy import risk_inputs, size_for
@@ -46,52 +48,62 @@ class RunResult:
     decision: dict = field(default_factory=dict)
 
 
-# ----------------------------------------------------------------------------- model status
-def resolve_model_mode(artifacts_dir: Path, cfg, now: pd.Timestamp) -> tuple[str, dict, str]:
+# ----------------------------------------------------------------------------- active strategy
+def resolve_strategy(artifacts_dir: Path, cfg, now: pd.Timestamp) -> tuple[str, dict, str]:
+    """Which strategy trades tonight. Anything but a fresh, Alpaca-based validation of the current
+    config falls back to the plain SMA200 benchmark."""
     p = artifacts_dir / "model_status.json"
     if not p.exists():
-        return "RULE", {}, "no validation status found -> rule-based fallback"
+        return FALLBACK, {}, "no validation status found -> sma200 fallback"
     st = json.loads(p.read_text())
-    if st.get("mode") != "ML":
-        return "RULE", st, st.get("message", "gate not passed -> rule-based fallback")
+    active = st.get("active_strategy") or ("ml" if st.get("mode") == "ML" else FALLBACK)
+    if active == FALLBACK:
+        return FALLBACK, st, st.get("message", "no candidate passed validation -> sma200 fallback")
     if st.get("data_source") != "ALPACA":
-        return "RULE", st, "validation not run on Alpaca data -> rule-based fallback"
+        return FALLBACK, st, "validation not run on Alpaca data -> sma200 fallback"
     age = (now - pd.Timestamp(st["validated_at"])).days
     if age > cfg["risk"]["model_max_age_days"]:
-        return "RULE", st, f"validation is {age} days old (> {cfg['risk']['model_max_age_days']}) -> rule-based fallback"
+        return FALLBACK, st, f"validation is {age} days old (> {cfg['risk']['model_max_age_days']}) -> sma200 fallback"
     if st.get("config_hash") != config_hash(cfg):
-        return "RULE", st, "config changed since validation -> rule-based fallback until re-validated"
-    return "ML", st, "ML ensemble passed the out-of-sample gate"
+        return FALLBACK, st, "config changed since validation -> sma200 fallback until re-validated"
+    if active != "ml" and active not in REGISTRY:
+        return FALLBACK, st, f"unknown strategy {active!r} in validation status -> sma200 fallback"
+    return active, st, st.get("message", f"{active} passed validation")
 
 
 # ----------------------------------------------------------------------------- signal
-def compute_live_signal(bars, cfg, prev: PosState, model_mode: str, calendar: bool, signal_date: dt.date) -> dict:
-    sig_sym = cfg["data"]["signal_symbol"]
-    feats = build_features(bars, cfg, include_calendar=calendar)
+def compute_live_signal(bars, cfg, prev: PosState, strategy: str, calendar: bool, signal_date: dt.date) -> dict:
     t = pd.Timestamp(signal_date)
+    sig_sym = cfg["data"]["signal_symbol"]
+    long_sym, short_sym = cfg["data"]["trade_symbols"]["long"], cfg["data"]["trade_symbols"]["short"]
+    close = {s: float(bars[s]["close"].loc[t]) for s in (long_sym, short_sym)}
+    feats = build_features(bars, cfg, include_calendar=calendar and strategy == "ml")
     if feats.index[-1] != t:
         raise DataError(f"feature row for {signal_date} missing (last {feats.index[-1].date()})")
     regime = classify_regimes(feats, cfg["regime"])
     r_today = regime.loc[t]
-    p_up = p_hv = None
-    trained_through = None
-    if model_mode == "ML":
-        labels = make_labels(bars[sig_sym]["close"], cfg["labels"]["horizon"], cfg["labels"]["high_vol_threshold"])
-        rows = usable_rows(feats)
-        X, Y = feats.loc[rows], labels.loc[rows]
-        ens = Ensemble(cfg).fit(X, Y)  # labels of the last h rows are NaN and are excluded inside fit
-        p = ens.predict(X.loc[[t]]).iloc[0]
-        p_up, p_hv = float(p["p_up"]), float(p["p_hivol"])
-        trained_through = str(Y["y_up"].last_valid_index().date())
-    new_st, _, reason = decision_step(prev, r_today if isinstance(r_today, str) else None, p_up, p_hv,
-                                      cfg["decision"], cfg["fallback"], model_mode)
+    r_today = r_today if isinstance(r_today, str) else None
+    if strategy != "ml":
+        # same causal path as the backtest, over full history; tonight's decision is its last row
+        row = run_path(strategy, make_inputs(bars, cfg), cfg).iloc[-1]
+        w = float(row["w_TQQQ"] if row["state"] == LONG else row["w_SQQQ"])
+        new_st = PosState(row["state"], int(row["days_held"]), int(row["sqqq_cooldown"]))
+        return {"regime": r_today, "p_up": None, "p_hivol": None, "strategy": strategy, "model_mode": "RULE",
+                "state": new_st, "weight": w, "reason": row["reason"], "trained_through": None, "close": close}
+    labels = make_labels(bars[sig_sym]["close"], cfg["labels"]["horizon"], cfg["labels"]["high_vol_threshold"])
+    rows = usable_rows(feats)
+    X, Y = feats.loc[rows], labels.loc[rows]
+    ens = Ensemble(cfg).fit(X, Y)  # labels of the last h rows are NaN and are excluded inside fit
+    p = ens.predict(X.loc[[t]]).iloc[0]
+    p_up, p_hv = float(p["p_up"]), float(p["p_hivol"])
+    new_st, _, reason = decision_step(prev, r_today, p_up, p_hv, cfg["decision"], None, "ML")
     rk = {s: df.loc[t].to_dict() for s, df in risk_inputs(bars, cfg).items()}
-    w = size_for(new_st.position, p_up, model_mode, rk, cfg)
+    w = size_for(new_st.position, p_up, "ML", rk, cfg)
     if new_st.position != CASH and w == 0:
         reason += " | size below min weight -> effectively cash"
-    return {"regime": r_today, "p_up": p_up, "p_hivol": p_hv, "model_mode": model_mode, "state": new_st,
-            "weight": w, "reason": reason, "trained_through": trained_through,
-            "close": {s: float(bars[s]["close"].loc[t]) for s in cfg["data"]["trade_symbols"].values()}}
+    return {"regime": r_today, "p_up": p_up, "p_hivol": p_hv, "strategy": "ml", "model_mode": "ML",
+            "state": new_st, "weight": w, "reason": "ml: " + reason,
+            "trained_through": str(Y["y_up"].last_valid_index().date()), "close": close}
 
 
 # ----------------------------------------------------------------------------- main flow
@@ -176,13 +188,14 @@ def run(cfg, *, now: pd.Timestamp, broker, bars_loader, state_dir: Path, artifac
         log.error("RISK: %s", r)
 
     # --- signal ---------------------------------------------------------------------------
-    model_mode, model_status, model_msg = resolve_model_mode(artifacts_dir, cfg, now)
-    log.info("model mode: %s (%s)", model_mode, model_msg)
+    strategy, model_status, model_msg = resolve_strategy(artifacts_dir, cfg, now)
+    model_mode = "ML" if strategy == "ml" else "RULE"
+    log.info("active strategy: %s (%s)", strategy, model_msg)
     prev = PosState(**state["position"])
     sig = None
     if not data_problems:
         try:
-            sig = compute_live_signal(bars, cfg, prev, model_mode, bool(model_status.get("calendar_features", False)),
+            sig = compute_live_signal(bars, cfg, prev, strategy, bool(model_status.get("calendar_features", False)),
                                       signal_date)
         except Exception as e:  # noqa: BLE001
             kd.halt, kd.action = True, (kd.action if kd.action != "none" else "freeze")
@@ -219,13 +232,14 @@ def run(cfg, *, now: pd.Timestamp, broker, bars_loader, state_dir: Path, artifac
 
     decision = {
         "signal_date": sd, "regime": sig["regime"] if sig else None, "p_up": sig["p_up"] if sig else None,
-        "p_hivol": sig["p_hivol"] if sig else None, "model_mode": model_mode, "model_message": model_msg,
+        "p_hivol": sig["p_hivol"] if sig else None, "strategy": strategy, "model_mode": model_mode,
+        "model_message": model_msg, "objective": model_status.get("objective"),
         "state": sig["state"].position if sig else prev.position, "weight": sig["weight"] if sig else None,
         "reason": sig["reason"] if sig else "no signal (halted before signal)",
         "target": target, "orders": [o.to_dict() for o in orders], "halted": kd.halt, "halt_reasons": kd.reasons,
         "kill_action": kd.action, "positions": positions, "equity": acct.equity, "notes": notes,
     }
-    log.info("decision: regime=%s P(up)=%s P(hivol)=%s -> %s w=%s | %s", decision["regime"], decision["p_up"],
+    log.info("decision [%s]: regime=%s P(up)=%s P(hivol)=%s -> %s w=%s | %s", strategy, decision["regime"], decision["p_up"],
              decision["p_hivol"], decision["state"], decision["weight"], decision["reason"])
 
     if dry_run:
@@ -276,7 +290,8 @@ def run(cfg, *, now: pd.Timestamp, broker, bars_loader, state_dir: Path, artifac
     state.update({
         "mode": mode, "last_run_at": now.isoformat(), "peak_equity": peak,
         "last_decision": {k: v for k, v in decision.items() if k != "positions"},
-        "model": {"mode": model_mode, "message": model_msg, "validated_at": model_status.get("validated_at"),
+        "model": {"mode": model_mode, "strategy": strategy, "objective": model_status.get("objective"),
+                  "message": model_msg, "validated_at": model_status.get("validated_at"),
                   "trained_through": sig.get("trained_through") if sig else None,
                   "gate_passed": model_status.get("gate_passed")},
         "data_last_bar": str(bars[cfg["data"]["signal_symbol"]].index[-1].date())
@@ -284,7 +299,8 @@ def run(cfg, *, now: pd.Timestamp, broker, bars_loader, state_dir: Path, artifac
     })
     store.save(state)
     store.append("signals.csv", {"signal_date": sd, "regime": decision["regime"], "p_up": decision["p_up"],
-                                 "p_hivol": decision["p_hivol"], "model_mode": model_mode, "state": decision["state"],
+                                 "p_hivol": decision["p_hivol"], "model_mode": model_mode, "strategy": strategy,
+                                 "state": decision["state"],
                                  "w_TQQQ": sig["weight"] if sig and sig["state"].position == long_sym else 0.0,
                                  "w_SQQQ": sig["weight"] if sig and sig["state"].position == short_sym else 0.0,
                                  "target_symbol": next(iter(target), "CASH") if target else "CASH",

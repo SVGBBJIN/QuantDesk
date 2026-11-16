@@ -4,7 +4,8 @@ from __future__ import annotations
 import logging
 import os
 
-SECRET_ENV = ("ALPACA_KEY", "ALPACA_SECRET", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY")
+SECRET_ENV = ("ALPACA_KEY", "ALPACA_SECRET", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "QD_GITHUB_TOKEN",
+              "CRON_SECRET")
 
 
 class RedactSecrets(logging.Filter):

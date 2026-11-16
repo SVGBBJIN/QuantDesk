@@ -1,0 +1,20 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/cron/trade.py": {
+      "maxDuration": 300,
+      "includeFiles": "{src/tqqq_desk/**,config.yaml}",
+      "excludeFiles": "{tests/**,dashboard/**,scripts/**,data/**,state/**,.github/**}"
+    },
+    "api/cron/validate.py": {
+      "maxDuration": 300,
+      "includeFiles": "{src/tqqq_desk/**,config.yaml}",
+      "excludeFiles": "{tests/**,dashboard/**,scripts/**,data/**,state/**,.github/**}"
+    }
+  },
+  "crons": [
+    { "path": "/api/cron/trade", "schedule": "7 1 * * 2-6" },
+    { "path": "/api/cron/trade", "schedule": "7 4 * * 2-6" },
+    { "path": "/api/cron/validate", "schedule": "23 15 * * 6" }
+  ]
+}

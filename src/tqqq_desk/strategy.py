@@ -1,11 +1,10 @@
-"""Assemble regime + probabilities + decision state machine + sizing into a daily signal path."""
+"""The `ml` candidate strategy: regime + calibrated probabilities + decision state machine + sizing."""
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
 from .decision import CASH, LONG, SHORT, PosState, decision_step
-from .regime import classify_regimes
 from .sizing import etf_risk_inputs, final_weight
 
 
@@ -38,7 +37,7 @@ def build_signal_path(regime: pd.Series, probs: pd.DataFrame | None, bars, cfg, 
     rows = []
     for i in range(len(idx)):
         r = reg[i] if isinstance(reg[i], str) else None
-        st, _, reason = decision_step(st, r, pu[i], ph[i], cfg["decision"], cfg["fallback"], mode)
+        st, _, reason = decision_step(st, r, pu[i], ph[i], cfg["decision"], None, mode)
         row_risk = {sym: {c: rk[sym][c][i] for c in rk[sym]} for sym in rk}
         w = size_for(st.position, pu[i], mode, row_risk, cfg)
         if st.position != CASH and w == 0:
@@ -53,6 +52,3 @@ def to_target_weights(sig: pd.DataFrame, cfg) -> pd.DataFrame:
     ts = cfg["data"]["trade_symbols"]
     return pd.DataFrame({ts["long"]: sig["w_TQQQ"], ts["short"]: sig["w_SQQQ"]}, index=sig.index)
 
-
-def rule_signals(feats, bars, cfg, idx=None) -> pd.DataFrame:
-    return build_signal_path(classify_regimes(feats, cfg["regime"]), None, bars, cfg, "RULE", idx)

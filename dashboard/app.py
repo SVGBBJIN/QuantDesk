@@ -26,11 +26,13 @@ from tqqq_desk import yahoo  # noqa: E402
 # Reference categorical order (validated: adjacent-pair CVD dE >= 8, normal-vision dE >= 15).
 # Colour follows the entity, so each strategy always keeps the same hue.
 SERIES_COLORS = {
-    "ML ensemble": "#2a78d6",
-    "Rule regime (fallback)": "#eb6834",
+    "sentinel": "#2a78d6",
+    "accelerator": "#eb6834",
+    "anchor": "#7b5bd6",
+    "ml": "#5b8c3a",
+    "sma200": "#e87ba4",
     "B&H QQQ": "#1baf7a",
     "B&H TQQQ": "#eda100",
-    "TQQQ if QQQ>SMA200": "#e87ba4",
 }
 LIVE_COLOR = "#2a78d6"
 
@@ -169,13 +171,14 @@ with c1:
     else:
         st.success("✅ Kill switch armed, not tripped")
 with c2:
-    st.subheader("Model")
-    model_mode = model.get("mode") or status.get("mode") or "RULE"
-    if model_mode == "ML":
-        st.success("✅ ML ensemble active: it passed the out-of-sample gate")
+    st.subheader("Strategy")
+    active = model.get("strategy") or status.get("active_strategy") or "sma200"
+    objective = model.get("objective") or status.get("objective") or "—"
+    msg = model.get("message") or status.get("message") or "No validation has been run yet."
+    if active != "sma200":
+        st.success(f"✅ `{active}` active (objective: {objective}). {msg}")
     else:
-        st.warning("⚠️ RULE-BASED FALLBACK ACTIVE. " + (model.get("message") or status.get("message")
-                                                        or "No validation has been run yet."))
+        st.warning(f"⚠️ SMA200 BENCHMARK FALLBACK ACTIVE (objective: {objective}). {msg}")
 
 tab_live, tab_dec, tab_perf, tab_trades = st.tabs(["Live market", "Decision & freshness", "Performance", "Trades & signals"])
 
@@ -203,12 +206,14 @@ with tab_dec:
     exp = state.get("expected_positions", {})
     tgt = d.get("target")
     tgt_txt = "frozen (halt)" if tgt is None and d else (", ".join(f"{s} {w:.0%}" for s, w in (tgt or {}).items()) or "CASH")
-    fmt_p = lambda x: f"{x:.2f}" if x is not None else "n/a (rule mode)"
+    fmt_p = lambda x: f"{x:.2f}" if x is not None else "n/a (rule strategy)"
     st.table(pd.DataFrame({
         "Signal session": [d.get("signal_date") or "—"], "Regime": [d.get("regime") or "—"],
         "P(up, next 5d)": [fmt_p(d.get("p_up"))], "P(high vol, next 5d)": [fmt_p(d.get("p_hivol"))],
-        "Model": [d.get("model_mode") or "—"], "Target": [tgt_txt],
+        "Strategy": [d.get("strategy") or d.get("model_mode") or "—"], "Target": [tgt_txt],
     }).set_index("Signal session"))
+    if d.get("reason"):
+        st.caption(d["reason"])
     pos_txt = ", ".join(f"{s}: {q:g} sh" for s, q in exp.items()) or "CASH"
     st.markdown(f"**Position after pending orders fill:** {pos_txt}")
     if d.get("orders"):
@@ -263,7 +268,7 @@ with tab_perf:
             st.dataframe(summ[cols].style.format({c: ("{:.1%}" if c in pct else "{:.2f}") for c in cols}), width="stretch")
         rep = state_dir / "reports" / "backtest_report.md"
         if rep.exists():
-            with st.expander("Full backtest report (gate, model quality, sensitivity grids)"):
+            with st.expander("Full backtest report (strategy selection, robustness, model quality)"):
                 st.markdown(rep.read_text())
     else:
         st.caption("No backtest artifacts yet. Run the `validate` workflow or `scripts/backtest_report.py`.")

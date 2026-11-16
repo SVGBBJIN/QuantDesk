@@ -63,16 +63,58 @@ decision:
   sqqq_max_days: 10              # cap SQQQ holding period (volatility decay)
   sqqq_cooldown_days: 5          # after cap is hit, no SQQQ re-entry for this many days
 
-fallback:                        # rule-based regime strategy used when the ML gate fails
-  long_regimes: [BULL]
-  allow_sqqq: false
+selection:                       # which strategy trades (re-evaluated by the weekly validation)
+  # objective: risk_adjusted (Sharpe/Sortino/Calmar) | max_return (CAGR under a drawdown cap)
+  #            | robust (beat TQQQ-if-QQQ>SMA200 across years, bootstrap and parameter neighbourhoods)
+  objective: risk_adjusted
+  candidates: [sentinel, accelerator, anchor, ml]   # sma200 is always the fallback
+  min_bootstrap_prob: 0.60       # paired stationary bootstrap P(candidate beats SMA200) on the objective's metric
+  min_sharpe_diff: 0.0           # risk_adjusted: Sharpe must beat SMA200 by at least this
+  max_drawdown_cap: 0.45         # max_return: OOS max drawdown must stay within this
+  min_year_win_rate: 0.55        # robust: share of calendar years with excess return > 0 vs SMA200
+
+strategies:
+  sentinel:                      # designed for risk_adjusted
+    enter_score: 0.67            # >= 4 of 6 trend votes to enter TQQQ
+    exit_score: 0.34             # hold while >= 2 of 6 (hysteresis)
+    target_vol: 0.40             # TQQQ sized to 40% annualised vol, then x trend score
+    max_weight: 1.0
+    hv_cut: 0.45                 # QQQ 20d vol above this -> half size
+    crash_ratio: 1.8             # 10d/60d vol ratio above this while below SMA50 -> flat
+    allow_sqqq: true
+    short_band: -0.03            # SQQQ only if QQQ >= 3% below SMA200 and all 6 votes bearish
+    short_target_vol: 0.40
+    short_cap: 0.25
+    short_max_vol: 0.60          # no SQQQ into capitulation spikes (violent bear rallies)
+  accelerator:                   # designed for max_return
+    band_in: 0.01                # enter trend when QQQ > SMA200 by 1%
+    band_out: 0.01               # leave when QQQ < SMA200 by 1%
+    fast_reentry: true           # also long above a rising SMA50 with positive 20d momentum
+    fast_max_vol: 0.35
+    target_vol: 0.75             # near-full TQQQ in calm markets, scaled down in turbulence
+    max_weight: 1.0
+    dd_cap: 0.30                 # drawdown brake: size shrinks linearly from 15% to 30% strategy drawdown
+    dd_soft: 0.5
+    dd_floor_mult: 0.25
+    dd_halflife: 126             # the brake's high-water mark decays (half-life, sessions)
+    allow_sqqq: false            # off: on the 1999-2018 proxy the SQQQ sleeve cost ~3%/yr CAGR here
+    short_band: -0.05
+    short_target_vol: 0.60
+    short_cap: 0.50
+    short_max_vol: 0.55
+  anchor:                        # designed for robust
+    sma_lengths: [150, 200, 250]
+    band: 0.01                   # per-SMA entry/exit band (enter > +1%, exit < -1%)
+    target_vol: 0.65
+    max_weight: 1.0
+    crash_ratio: 1.8
 
 sizing:
   target_vol: 0.45               # annualized portfolio vol target
   vol_lookback: 20
   kelly_fraction: 0.25           # hard-capped at 0.25 in code
   kelly_lookback: 252
-  max_weight: {TQQQ: 1.00, SQQQ: 0.30}
+  max_weight: {TQQQ: 1.00, SQQQ: 0.30}   # ml strategy only
   min_weight: 0.05               # below this -> cash
   rebalance_band: 0.10           # don't trade if |target - current| weight change < band
 
@@ -80,22 +122,15 @@ costs:
   commission_bps: 2.0
   slippage_bps: 1.0
 
-gate:
-  benchmark: sma200
-  min_sharpe_diff: 0.0
-  require_sortino_better: true
-  min_bootstrap_prob: 0.60       # P(Sharpe_ML > Sharpe_SMA200) under paired block bootstrap
-
 sensitivity:
   ml:   {up_enter: [0.50, 0.525, 0.55, 0.575, 0.60, 0.625], vol_cap: [0.30, 0.40, 0.50, 0.60, 0.70]}
-  rule: {bull_enter: [-0.01, 0.0, 0.01, 0.02, 0.03, 0.04], hv_enter: [0.30, 0.35, 0.40, 0.45, 0.50]}
 
 risk:
   max_daily_loss: 0.08           # halt if account equity falls > 8% vs prior close
   max_drawdown: 0.30             # halt if equity falls > 30% from peak
   kill_action: flatten           # flatten (exit to cash, then halt) or freeze (no orders)
   buying_power_buffer: 0.05      # assume open can gap 5% above last close when sizing buys
-  model_max_age_days: 14         # older validation status -> rule fallback
+  model_max_age_days: 14         # older validation status -> sma200 fallback
 
 execution:
   order_type: market_on_open     # Alpaca TIF=OPG, whole shares

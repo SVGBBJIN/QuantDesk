@@ -26,7 +26,7 @@ CSV_FIELDS = {
     "trades.csv": ["ts", "signal_date", "event", "symbol", "side", "qty", "client_order_id", "status",
                    "filled_qty", "fill_price", "mode", "note"],
     "signals.csv": ["signal_date", "regime", "p_up", "p_hivol", "model_mode", "state", "w_TQQQ", "w_SQQQ",
-                    "target_symbol", "target_qty", "halted", "reason"],
+                    "target_symbol", "target_qty", "halted", "reason", "strategy"],
     "equity.csv": ["date", "equity", "last_equity", "cash", "peak_equity", "drawdown", "mode"],
 }
 
@@ -58,6 +58,16 @@ class StateStore:
         path = self.root / name
         fields = CSV_FIELDS[name]
         new = not path.exists()
+        if not new:
+            with open(path, newline="") as f:
+                header = next(csv.reader(f), [])
+            if header != fields:  # schema grew (new columns are appended): rewrite once with the new header
+                with open(path, newline="") as f:
+                    old = list(csv.DictReader(f))
+                with open(path, "w", newline="") as f:
+                    w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+                    w.writeheader()
+                    w.writerows({k: r.get(k, "") for k in fields} for r in old)
         with open(path, "a", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
             if new:
